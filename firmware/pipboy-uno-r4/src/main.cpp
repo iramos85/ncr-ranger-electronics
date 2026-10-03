@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <Arduino_GFX_Library.h>
 #include <TouchScreen.h>
 
@@ -52,6 +53,17 @@ TouchScreen ts = TouchScreen(XP, YP, XM, YM, 300);
 bool trackingActive = false;
 bool cannonLightActive = false;
 bool touchWasDown = false;
+
+// =====================================================
+// RADIO / HELMET STATUS
+// =====================================================
+#define RADIO_BRIDGE_ADDRESS 0x42
+
+bool helmetOnline = false;
+
+unsigned long lastHelmetPoll = 0;
+const unsigned long HELMET_POLL_INTERVAL = 2000;
+
 
 // =====================================================
 // SYSTEM EVENTS
@@ -156,6 +168,33 @@ void drawButton(
   gfx->print(label);
 }
 
+void drawNodeStatus(
+  int x,
+  const char* label,
+  bool online
+) {
+
+  // Clear this node's footer area
+  gfx->fillRect(x, 275, 110, 42, NCR_BLACK);
+
+  gfx->setTextSize(1);
+
+  gfx->setTextColor(NCR_GRAY);
+  gfx->setCursor(x, 285);
+  gfx->print(label);
+
+  gfx->setCursor(x, 300);
+
+  if (online) {
+    gfx->setTextColor(NCR_GREEN);
+    gfx->print("ONLINE");
+  }
+  else {
+    gfx->setTextColor(NCR_AMBER);
+    gfx->print("OFFLINE");
+  }
+}
+
 void drawScreen() {
 
   gfx->fillScreen(NCR_BLACK);
@@ -197,29 +236,10 @@ void drawScreen() {
     NCR_GREEN
   );
 
-  // Footer
-  gfx->setTextSize(1);
-  gfx->setTextColor(NCR_GRAY);
-
-  gfx->setCursor(20, 285);
-  gfx->print("HELMET");
-
-  gfx->setCursor(180, 285);
-  gfx->print("CANNON");
-
-  gfx->setCursor(350, 285);
-  gfx->print("AUDIO");
-
-  gfx->setTextColor(NCR_AMBER);
-
-  gfx->setCursor(20, 300);
-  gfx->print("OFFLINE");
-
-  gfx->setCursor(180, 300);
-  gfx->print("OFFLINE");
-
-  gfx->setCursor(350, 300);
-  gfx->print("OFFLINE");
+// Footer
+drawNodeStatus(20,  "HELMET", helmetOnline);
+drawNodeStatus(180, "CANNON", false);
+drawNodeStatus(350, "AUDIO",  false);
 }
 
 // =====================================================
@@ -339,6 +359,62 @@ void handleTouch(int x, int y) {
 }
 
 // =====================================================
+// HELMET LINK
+// =====================================================
+bool pingHelmet() {
+
+  Serial.println("RADIO -> PING");
+
+  Wire1.beginTransmission(RADIO_BRIDGE_ADDRESS);
+  Wire1.write((const uint8_t*)"PING", 4);
+
+  byte txResult = Wire1.endTransmission();
+
+  if (txResult != 0) {
+    Serial.print("XIAO I2C ERROR: ");
+    Serial.println(txResult);
+    return false;
+  }
+
+  // The bridge can briefly report WAIT while ESP-NOW
+  // completes the round trip to the helmet.
+  for (int attempt = 0; attempt < 5; attempt++) {
+
+    delay(40);
+
+    Wire1.requestFrom(RADIO_BRIDGE_ADDRESS, 4);
+
+    char response[5] = {0};
+    int i = 0;
+
+    while (Wire1.available() && i < 4) {
+      response[i++] = Wire1.read();
+    }
+
+    response[i] = '\0';
+
+    if (i == 0) {
+      continue;
+    }
+
+    Serial.print("RADIO <- ");
+    Serial.println(response);
+
+    if (strcmp(response, "PONG") == 0) {
+      return true;
+    }
+
+    if (strcmp(response, "WAIT") == 0) {
+      continue;
+    }
+  }
+
+  Serial.println("*** NO HELMET RESPONSE ***");
+  return false;
+}
+
+
+// =====================================================
 // SETUP
 // =====================================================
 void setup() {
@@ -356,18 +432,42 @@ void setup() {
     while (1);
   }
 
-  Serial.println("Display: ONLINE");
-  Serial.println("Touch:   ONLINE");
-  Serial.println("Radio:   NOT INSTALLED");
-  Serial.println("System:  STANDBY");
+Wire1.begin();
+Wire1.setClock(100000);
 
-  drawScreen();
+Serial.println("Display: ONLINE");
+Serial.println("Touch:   ONLINE");
+Serial.println("Radio:   XIAO BRIDGE ENABLED");
+Serial.println("System:  STANDBY");
+
+drawScreen();
 }
 
 // =====================================================
 // LOOP
 // =====================================================
 void loop() {
+
+if (millis() - lastHelmetPoll >= HELMET_POLL_INTERVAL) {
+
+  lastHelmetPoll = millis();
+
+  bool newHelmetState = pingHelmet();
+
+  if (newHelmetState != helmetOnline) {
+
+    helmetOnline = newHelmetState;
+
+    if (helmetOnline) {
+      Serial.println("HELMET: ONLINE");
+    }
+    else {
+      Serial.println("HELMET: OFFLINE");
+    }
+
+    drawNodeStatus(20, "HELMET", helmetOnline);
+  }
+}
 
   int touchX;
   int touchY;
