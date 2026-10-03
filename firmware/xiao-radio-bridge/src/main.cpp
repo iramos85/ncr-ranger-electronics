@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_arduino_version.h>
 #include <Wire.h>
 #include <WiFi.h>
 #include <esp_now.h>
@@ -18,18 +19,29 @@ const uint8_t broadcastAddress[] = {
 };
 
 volatile bool commandPending = false;
+volatile bool responseReady = false;
+volatile bool awaitingResponse = false;
 
 char pendingCommand[FRAME_SIZE] = {0};
 char latestResponse[FRAME_SIZE] = {0};
 
 
+// =====================================================
+// RESPONSE BUFFER
+// =====================================================
 void setResponse(const char *msg) {
+
   memset(latestResponse, 0, FRAME_SIZE);
   strncpy(latestResponse, msg, FRAME_SIZE - 1);
 }
 
 
+// =====================================================
+// I2C RECEIVE FROM UNO
+// =====================================================
 void receiveEvent(int howMany) {
+
+  (void)howMany;
 
   memset(pendingCommand, 0, FRAME_SIZE);
 
@@ -44,30 +56,58 @@ void receiveEvent(int howMany) {
     Wire.read();
   }
 
+  // Invalidate any response from the previous command.
   setResponse("WAIT");
 
+  responseReady = false;
+  awaitingResponse = false;
   commandPending = true;
 }
 
 
+// =====================================================
+// I2C RESPONSE TO UNO
+// =====================================================
 void requestEvent() {
 
-  // ALWAYS return exactly 16 bytes
-  Wire.write(
-    (const uint8_t *)latestResponse,
-    FRAME_SIZE
-  );
+  static const uint8_t waitFrame[FRAME_SIZE] = {
+    'W', 'A', 'I', 'T'
+  };
+
+  if (responseReady) {
+
+    Wire.write(
+      (const uint8_t *)latestResponse,
+      FRAME_SIZE
+    );
+
+    // A response is valid for one read only.
+    responseReady = false;
+    awaitingResponse = false;
+  }
+  else {
+
+    Wire.write(
+      waitFrame,
+      FRAME_SIZE
+    );
+  }
 }
 
 
-void onDataReceived(
-  const uint8_t *mac_addr,
+// =====================================================
+// PROCESS ESP-NOW RESPONSE
+// =====================================================
+void processRadioResponse(
   const uint8_t *data,
   int len
 ) {
 
-  // Sender MAC is not currently needed
-  (void)mac_addr;
+  // Ignore packets unless we are waiting for a response
+  // to the command we just transmitted.
+  if (!awaitingResponse) {
+    return;
+  }
 
   memset(latestResponse, 0, FRAME_SIZE);
 
@@ -78,9 +118,55 @@ void onDataReceived(
     data,
     copyLength
   );
+
+  responseReady = true;
+  awaitingResponse = false;
 }
 
 
+// =====================================================
+// ESP-NOW RECEIVE CALLBACK
+// Arduino-ESP32 3.x
+// =====================================================
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+
+void onDataReceived(
+  const esp_now_recv_info_t *info,
+  const uint8_t *data,
+  int len
+) {
+
+  // Sender information is not currently needed
+  (void)info;
+
+  processRadioResponse(data, len);
+}
+
+
+// =====================================================
+// ESP-NOW RECEIVE CALLBACK
+// Arduino-ESP32 2.x
+// =====================================================
+#else
+
+void onDataReceived(
+  const uint8_t *mac_addr,
+  const uint8_t *data,
+  int len
+) {
+
+  // Sender MAC is not currently needed
+  (void)mac_addr;
+
+  processRadioResponse(data, len);
+}
+
+#endif
+
+
+// =====================================================
+// SETUP
+// =====================================================
 void setup() {
 
   setResponse("READY");
@@ -107,6 +193,7 @@ void setup() {
   );
 
   if (esp_now_init() != ESP_OK) {
+
     setResponse("RADIO_ERR");
 
     while (true) {
@@ -133,17 +220,32 @@ void setup() {
 }
 
 
+// =====================================================
+// LOOP
+// =====================================================
 void loop() {
 
   if (commandPending) {
 
     commandPending = false;
 
-    esp_now_send(
+    // Only responses arriving after this point
+    // can satisfy the current command.
+    awaitingResponse = true;
+
+    esp_err_t result = esp_now_send(
       broadcastAddress,
       (const uint8_t *)pendingCommand,
       strlen(pendingCommand) + 1
     );
+
+    if (result != ESP_OK) {
+
+      awaitingResponse = false;
+
+      setResponse("SEND_ERR");
+      responseReady = true;
+    }
   }
 
   delay(1);
