@@ -179,16 +179,49 @@ void setup() {
   digitalWrite(FAN_PIN, LOW);
   fanActive = false;
 
-  WiFi.mode(WIFI_STA);
+  // -----------------------------------------------------
+// Wi-Fi / ESP-NOW RADIO SETUP
+// -----------------------------------------------------
 
-  delay(100);
+// Start from a clean radio state.
+// This helmet node does not need to connect to normal Wi-Fi.
+WiFi.mode(WIFI_STA);
+WiFi.disconnect();
 
-  esp_wifi_set_channel(
-    ESPNOW_CHANNEL,
-    WIFI_SECOND_CHAN_NONE
-  );
+delay(200);
 
-  if (esp_now_init() != ESP_OK) {
+// Force the ESP32 radio onto our dedicated ESP-NOW channel.
+esp_wifi_set_promiscuous(true);
+
+esp_err_t channelResult = esp_wifi_set_channel(
+  ESPNOW_CHANNEL,
+  WIFI_SECOND_CHAN_NONE
+);
+
+esp_wifi_set_promiscuous(false);
+
+
+// Verify what channel the radio is ACTUALLY using.
+uint8_t actualChannel = 0;
+wifi_second_chan_t secondaryChannel;
+
+esp_wifi_get_channel(
+  &actualChannel,
+  &secondaryChannel
+);
+
+Serial.print("Channel set result: ");
+Serial.println(channelResult);
+
+Serial.print("Requested channel: ");
+Serial.println(ESPNOW_CHANNEL);
+
+Serial.print("Actual channel:    ");
+Serial.println(actualChannel);
+
+
+// Start ESP-NOW
+if (esp_now_init() != ESP_OK) {
 
     Serial.println("ESP-NOW INIT FAILED");
 
@@ -200,7 +233,6 @@ void setup() {
   esp_now_register_recv_cb(onDataReceived);
 
   Serial.println("ESP-NOW: ONLINE");
-  Serial.println("Channel: 6");
   Serial.println("Fan:     OFF");
   Serial.println("System:  READY");
 }
