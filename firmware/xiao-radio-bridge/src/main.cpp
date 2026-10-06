@@ -51,12 +51,11 @@ void receiveEvent(int howMany) {
     pendingCommand[i++] = Wire.read();
   }
 
-  // Drain anything extra
   while (Wire.available()) {
     Wire.read();
   }
 
-  // Invalidate any response from the previous command.
+  // Invalidate any previous response.
   setResponse("WAIT");
 
   responseReady = false;
@@ -81,7 +80,6 @@ void requestEvent() {
       FRAME_SIZE
     );
 
-    // A response is valid for one read only.
     responseReady = false;
     awaitingResponse = false;
   }
@@ -103,8 +101,6 @@ void processRadioResponse(
   int len
 ) {
 
-  // Ignore packets unless we are waiting for a response
-  // to the command we just transmitted.
   if (!awaitingResponse) {
     return;
   }
@@ -121,12 +117,14 @@ void processRadioResponse(
 
   responseReady = true;
   awaitingResponse = false;
+
+  Serial.print("ESP-NOW RX: ");
+  Serial.println(latestResponse);
 }
 
 
 // =====================================================
 // ESP-NOW RECEIVE CALLBACK
-// Arduino-ESP32 3.x
 // =====================================================
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
 
@@ -136,17 +134,11 @@ void onDataReceived(
   int len
 ) {
 
-  // Sender information is not currently needed
   (void)info;
 
   processRadioResponse(data, len);
 }
 
-
-// =====================================================
-// ESP-NOW RECEIVE CALLBACK
-// Arduino-ESP32 2.x
-// =====================================================
 #else
 
 void onDataReceived(
@@ -155,7 +147,6 @@ void onDataReceived(
   int len
 ) {
 
-  // Sender MAC is not currently needed
   (void)mac_addr;
 
   processRadioResponse(data, len);
@@ -169,9 +160,20 @@ void onDataReceived(
 // =====================================================
 void setup() {
 
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println(" NCR XIAO RADIO BRIDGE");
+  Serial.println("==============================");
+
   setResponse("READY");
 
+
+  // ---------------------------------------------------
   // I2C
+  // ---------------------------------------------------
   Wire.onReceive(receiveEvent);
   Wire.onRequest(requestEvent);
 
@@ -182,17 +184,52 @@ void setup() {
     100000
   );
 
+  Serial.println("I2C: ONLINE");
+  Serial.println("Address: 0x42");
 
-  // ESP-NOW
+
+  // ---------------------------------------------------
+  // Wi-Fi / ESP-NOW radio
+  // ---------------------------------------------------
   WiFi.mode(WIFI_STA);
-  delay(100);
+  WiFi.disconnect();
 
-  esp_wifi_set_channel(
+  delay(200);
+
+  esp_wifi_set_promiscuous(true);
+
+  esp_err_t channelResult = esp_wifi_set_channel(
     ESPNOW_CHANNEL,
     WIFI_SECOND_CHAN_NONE
   );
 
+  esp_wifi_set_promiscuous(false);
+
+
+  uint8_t actualChannel = 0;
+  wifi_second_chan_t secondaryChannel;
+
+  esp_wifi_get_channel(
+    &actualChannel,
+    &secondaryChannel
+  );
+
+  Serial.print("Channel set result: ");
+  Serial.println(channelResult);
+
+  Serial.print("Requested channel: ");
+  Serial.println(ESPNOW_CHANNEL);
+
+  Serial.print("Actual channel:    ");
+  Serial.println(actualChannel);
+
+
+  // ---------------------------------------------------
+  // ESP-NOW
+  // ---------------------------------------------------
   if (esp_now_init() != ESP_OK) {
+
+    Serial.println("ESP-NOW INIT FAILED");
 
     setResponse("RADIO_ERR");
 
@@ -216,7 +253,13 @@ void setup() {
   peer.encrypt = false;
   peer.ifidx = WIFI_IF_STA;
 
-  esp_now_add_peer(&peer);
+  esp_err_t peerResult = esp_now_add_peer(&peer);
+
+  Serial.print("Peer add result: ");
+  Serial.println(peerResult);
+
+  Serial.println("ESP-NOW: ONLINE");
+  Serial.println("System: READY");
 }
 
 
@@ -229,8 +272,9 @@ void loop() {
 
     commandPending = false;
 
-    // Only responses arriving after this point
-    // can satisfy the current command.
+    Serial.print("I2C RX: ");
+    Serial.println(pendingCommand);
+
     awaitingResponse = true;
 
     esp_err_t result = esp_now_send(
@@ -238,6 +282,9 @@ void loop() {
       (const uint8_t *)pendingCommand,
       strlen(pendingCommand) + 1
     );
+
+    Serial.print("ESP-NOW TX result: ");
+    Serial.println(result);
 
     if (result != ESP_OK) {
 
