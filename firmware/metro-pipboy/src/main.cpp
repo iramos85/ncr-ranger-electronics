@@ -1,7 +1,7 @@
-// NCR Ranger Pip-Boy -- Metro ESP32-S3 recovered working baseline.
-// Reconstructed from the validated sketch and subsequent changes in chat.
-// This baseline includes display, reversed ADC1 touch, three UI event buttons,
-// and ESP-NOW initialization on channel 6. Direct helmet link is NOT included.
+// NCR Ranger Pip-Boy / Adafruit Metro ESP32-S3
+// Native ESP-NOW helmet link, authenticated by learned sender MAC (not cryptographic).
+// Includes physical fan button, unicast control, and confirmed fan state.
+// Based on the verified ILI9486 + ADC1 touch + channel 6 Pip-Boy firmware.
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -53,18 +53,33 @@ const int LIGHT_Y = 80;
 const int LIGHT_W = 205;
 const int LIGHT_H = 75;
 
-const int SFX_X = 80;
+// Second row: SFX on left; helmet fan on right.
+const int SFX_X = 20;
 const int SFX_Y = 185;
-const int SFX_W = 320;
+const int SFX_W = 205;
 const int SFX_H = 65;
+
+const int FAN_X = 255;
+const int FAN_Y = 185;
+const int FAN_W = 205;
+const int FAN_H = 65;
 
 bool trackingActive = false;
 bool cannonLightActive = false;
 
-// Link logic intentionally NOT enabled yet; these are truthful placeholders.
+// Dynamic helmet link; the other two nodes are not connected yet.
 bool helmetOnline = false;
 bool cannonOnline = false;
 bool audioOnline = false;
+
+bool helmetFanOn = false;
+bool fanStateKnown = false;
+bool fanCommandPending = false;
+bool requestedFanOn = false;
+unsigned long fanCommandSentAt = 0;
+
+// handleTouch() precedes the radio implementation below.
+void sendHelmetFanCommand(bool turnOn);
 
 bool touchWasDown = false;
 uint8_t releaseSamples = 0;
@@ -95,6 +110,20 @@ void drawNodeStatus(int x, const char *label, bool online) {
     gfx->print(online ? "ONLINE" : "OFFLINE");
 }
 
+void drawFanButton() {
+    if (!helmetOnline) {
+        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "FAN: OFFLINE", NCR_GRAY);
+    } else if (fanCommandPending) {
+        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "HELMET FAN: ...", NCR_AMBER);
+    } else if (!fanStateKnown) {
+        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "HELMET FAN: ?", NCR_GREEN);
+    } else {
+        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H,
+                   helmetFanOn ? "HELMET FAN: ON" : "HELMET FAN: OFF",
+                   helmetFanOn ? NCR_AMBER : NCR_GREEN);
+    }
+}
+
 void drawScreen() {
     gfx->fillScreen(NCR_BLACK);
     gfx->fillRect(0, 0, 480, 45, NCR_DARK_GREEN);
@@ -114,6 +143,7 @@ void drawScreen() {
                cannonLightActive ? NCR_AMBER : NCR_GREEN);
     drawButton(SFX_X, SFX_Y, SFX_W, SFX_H,
                "PLAY TEST SFX", NCR_GREEN);
+    drawFanButton();
 
     drawNodeStatus(20, "HELMET", helmetOnline);
     drawNodeStatus(180, "CANNON", cannonOnline);
@@ -171,6 +201,11 @@ void handleTouch(int x, int y) {
         Serial.println("EVENT: SFX_TEST");
         return;
     }
+    if (insideButton(x, y, FAN_X, FAN_Y, FAN_W, FAN_H)) {
+        // If status is unknown, request ON and await acknowledgement.
+        sendHelmetFanCommand(fanStateKnown ? !helmetFanOn : true);
+        return;
+    }
 }
 
 void initRadio() {
@@ -214,126 +249,236 @@ void initRadio() {
 }
 
 
-//
-// DIRECT HELMET ESP-NOW LINK
-//
+// =====================================================
+// DIRECT ESP-NOW HELMET LINK
+// =====================================================
 
 const uint8_t HELMET_BROADCAST[6] = {
-  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 };
 
-volatile bool helmetPongPending = false;
 bool helmetProbeReady = false;
-
+bool helmetPeerReady = false;
+bool helmetMacKnown = false;
+uint8_t helmetMac[6] = {0};
 unsigned long lastHelmetPing = 0;
 unsigned long lastHelmetPong = 0;
 
-// Called by the ESP-NOW Wi-Fi task.
-// Keep this callback short.
-void onHelmetReceive(
-  const esp_now_recv_info_t *info,
-  const uint8_t *data,
-  int len
-) {
-  if (data != nullptr &&
-      len >= 4 &&
-      memcmp(data, "PONG", 4) == 0) {
+// ESPNOW callbacks execute on the Wi-Fi task. Only copy data here;
+// peer registration, drawing, printing, and state updates happen in loop().
+portMUX_TYPE helmetRxMux = portMUX_INITIALIZER_UNLOCKED;
+bool rxPongPending = false;
+uint8_t rxPongMac[6] = {0};
+uint8_t rxFanReply = 0;
+uint8_t rxFanMac[6] = {0};
+// Fan reply: 1=FAN_ON_OK, 2=FAN_OFF_OK, 3=FAN_ON, 4=FAN_OFF
 
-    helmetPongPending = true;
-  }
+void onHelmetReceive(const esp_now_recv_info_t *info,
+                     const uint8_t *data, int len) {
+    if (info == nullptr || info->src_addr == nullptr || data == nullptr)
+        return;
+
+    if (len >= (int)sizeof("PONG") &&
+        memcmp(data, "PONG", sizeof("PONG")) == 0) {
+        portENTER_CRITICAL(&helmetRxMux);
+        memcpy(rxPongMac, info->src_addr, 6);
+        rxPongPending = true;
+        portEXIT_CRITICAL(&helmetRxMux);
+        return;
+    }
+
+    uint8_t reply = 0;
+    if (len >= (int)sizeof("FAN_ON_OK") &&
+        memcmp(data, "FAN_ON_OK", sizeof("FAN_ON_OK")) == 0) reply = 1;
+    else if (len >= (int)sizeof("FAN_OFF_OK") &&
+             memcmp(data, "FAN_OFF_OK", sizeof("FAN_OFF_OK")) == 0) reply = 2;
+    else if (len >= (int)sizeof("FAN_ON") &&
+             memcmp(data, "FAN_ON", sizeof("FAN_ON")) == 0) reply = 3;
+    else if (len >= (int)sizeof("FAN_OFF") &&
+             memcmp(data, "FAN_OFF", sizeof("FAN_OFF")) == 0) reply = 4;
+
+    if (reply != 0) {
+        portENTER_CRITICAL(&helmetRxMux);
+        memcpy(rxFanMac, info->src_addr, 6);
+        rxFanReply = reply;
+        portEXIT_CRITICAL(&helmetRxMux);
+    }
 }
 
 void startHelmetProbe() {
+    if (!radioReady) {
+        Serial.println("HELMET: RADIO NOT READY");
+        return;
+    }
+    esp_err_t result = esp_now_register_recv_cb(onHelmetReceive);
+    if (result != ESP_OK) {
+        Serial.printf("HELMET RX ERROR: %d\n", (int)result);
+        return;
+    }
 
-  if (!radioReady) {
-    Serial.println("HELMET: RADIO NOT READY");
-    return;
-  }
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, HELMET_BROADCAST, 6);
+    peer.channel = ESPNOW_CHANNEL;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
 
-  esp_err_t result =
-    esp_now_register_recv_cb(onHelmetReceive);
+    result = esp_now_add_peer(&peer);
+    if (result != ESP_OK && result != ESP_ERR_ESPNOW_EXIST) {
+        Serial.printf("HELMET BROADCAST PEER ERROR: %d\n", (int)result);
+        return;
+    }
+    helmetProbeReady = true;
+    Serial.println("HELMET: PROBE READY");
+}
 
-  if (result != ESP_OK) {
-    Serial.printf("HELMET RX ERROR: %d\n", (int)result);
-    return;
-  }
+bool registerHelmetPeer() {
+    if (!helmetMacKnown) return false;
+    if (esp_now_is_peer_exist(helmetMac)) return true;
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, helmetMac, 6);
+    peer.channel = ESPNOW_CHANNEL;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+    esp_err_t result = esp_now_add_peer(&peer);
+    if (result != ESP_OK && result != ESP_ERR_ESPNOW_EXIST) {
+        Serial.printf("HELMET UNICAST PEER ERROR: %d\n", (int)result);
+        return false;
+    }
+    Serial.printf("HELMET MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  helmetMac[0], helmetMac[1], helmetMac[2],
+                  helmetMac[3], helmetMac[4], helmetMac[5]);
+    Serial.println("HELMET: UNICAST READY");
+    return true;
+}
 
-  esp_now_peer_info_t peer = {};
+void queryHelmetFanStatus() {
+    if (!helmetOnline || !helmetPeerReady) return;
+    const char command[] = "STATUS";
+    esp_err_t result = esp_now_send(helmetMac,
+                      (const uint8_t *)command, sizeof(command));
+    Serial.printf("METRO -> HELMET: STATUS %s\n",
+                  result == ESP_OK ? "QUEUED" : "FAILED");
+}
 
-  memcpy(
-    peer.peer_addr,
-    HELMET_BROADCAST,
-    6
-  );
+void sendHelmetFanCommand(bool turnOn) {
+    if (!radioReady || !helmetProbeReady ||
+        !helmetOnline || !helmetPeerReady) {
+        Serial.println("FAN: HELMET NOT CONNECTED - NOT SENT");
+        return;
+    }
+    if (fanCommandPending) {
+        Serial.println("FAN: WAITING FOR PRIOR ACK");
+        return;
+    }
 
-  peer.channel = ESPNOW_CHANNEL;
-  peer.ifidx = WIFI_IF_STA;
-  peer.encrypt = false;
+    const char *command = turnOn ? "FAN_ON" : "FAN_OFF";
+    // Set expectation before queueing so a fast acknowledgement is captured.
+    fanCommandPending = true;
+    requestedFanOn = turnOn;
+    fanCommandSentAt = millis();
+    drawFanButton();
 
-  result = esp_now_add_peer(&peer);
+    esp_err_t result = esp_now_send(
+        helmetMac, (const uint8_t *)command, strlen(command) + 1);
 
-  if (result != ESP_OK &&
-      result != ESP_ERR_ESPNOW_EXIST) {
-    Serial.printf("HELMET PEER ERROR: %d\n", (int)result);
-    return;
-  }
-
-  helmetProbeReady = true;
-  Serial.println("HELMET: PROBE READY");
+    if (result != ESP_OK) {
+        fanCommandPending = false;
+        drawFanButton();
+        Serial.printf("FAN: TRANSMIT ERROR %d\n", (int)result);
+    } else {
+        Serial.printf("METRO -> HELMET %s (QUEUED, UNICAST)\n", command);
+    }
 }
 
 void updateHelmetRadio() {
+    if (!helmetProbeReady) return;
+    unsigned long now = millis();
 
-  if (!helmetProbeReady) return;
+    // Atomically take the callback mailbox.
+    bool gotPong;
+    uint8_t pongMac[6];
+    uint8_t fanReply;
+    uint8_t replyMac[6];
+    portENTER_CRITICAL(&helmetRxMux);
+    gotPong = rxPongPending;
+    memcpy(pongMac, rxPongMac, 6);
+    rxPongPending = false;
+    fanReply = rxFanReply;
+    memcpy(replyMac, rxFanMac, 6);
+    rxFanReply = 0;
+    portEXIT_CRITICAL(&helmetRxMux);
 
-  unsigned long now = millis();
-
-  // Process received response outside callback.
-  if (helmetPongPending) {
-
-    helmetPongPending = false;
-    lastHelmetPong = now;
-
-    Serial.println("HELMET <- PONG");
-
-    if (!helmetOnline) {
-      helmetOnline = true;
-
-      drawNodeStatus(20, "HELMET", true);
-      Serial.println("HELMET: ONLINE");
+    if (gotPong) {
+        if (!helmetMacKnown) {
+            memcpy(helmetMac, pongMac, 6);
+            helmetMacKnown = true;
+            helmetPeerReady = registerHelmetPeer();
+        }
+        // Ignore responses from unrelated ESP-NOW devices.
+        if (memcmp(pongMac, helmetMac, 6) == 0) {
+            lastHelmetPong = now;
+            if (!helmetOnline) {
+                helmetOnline = true;
+                fanStateKnown = false; // Feather may have rebooted.
+                drawNodeStatus(20, "HELMET", true);
+                drawFanButton();
+                Serial.println("HELMET <- PONG: ONLINE");
+                if (!helmetPeerReady) helmetPeerReady = registerHelmetPeer();
+                queryHelmetFanStatus();
+            }
+        }
     }
-  }
 
-  // Send PING every 2 seconds.
-  if (now - lastHelmetPing >= 2000) {
+    if (fanReply != 0 && helmetOnline && helmetMacKnown &&
+        memcmp(replyMac, helmetMac, 6) == 0) {
+        if (fanReply == 1 || fanReply == 2) {
+            bool reportedOn = (fanReply == 1);
+            if (fanCommandPending && reportedOn == requestedFanOn) {
+                fanCommandPending = false;
+                helmetFanOn = reportedOn;
+                fanStateKnown = true;
+                drawFanButton();
+                Serial.printf("HELMET ACK: FAN_%s_OK\n",
+                              reportedOn ? "ON" : "OFF");
+            } else {
+                Serial.println("HELMET: OUT-OF-ORDER FAN ACK IGNORED");
+            }
+        } else if (!fanCommandPending) {
+            // FAN_ON/FAN_OFF are replies to the STATUS query.
+            helmetFanOn = (fanReply == 3);
+            fanStateKnown = true;
+            drawFanButton();
+            Serial.printf("HELMET STATUS: FAN_%s\n",
+                          helmetFanOn ? "ON" : "OFF");
+        }
+    }
 
-    lastHelmetPing = now;
+    if (now - lastHelmetPing >= 2000) {
+        lastHelmetPing = now;
+        const char ping[] = "PING";
+        esp_err_t result = esp_now_send(
+            HELMET_BROADCAST, (const uint8_t *)ping, sizeof(ping));
+        if (result != ESP_OK)
+            Serial.printf("HELMET PING SEND ERROR: %d\n", (int)result);
+    }
 
-    const char message[] = "PING";
+    if (fanCommandPending && now - fanCommandSentAt >= 1500) {
+        fanCommandPending = false;
+        fanStateKnown = false; // Sent does not equal acknowledged.
+        drawFanButton();
+        Serial.println("HELMET: FAN ACK TIMEOUT - STATE UNKNOWN");
+        queryHelmetFanStatus();
+    }
 
-    esp_err_t result = esp_now_send(
-      HELMET_BROADCAST,
-      (const uint8_t *)message,
-      sizeof(message)
-    );
-
-    Serial.printf(
-      "METRO -> HELMET PING: %d\n",
-      (int)result
-    );
-  }
-
-  // Mark offline after 6 seconds without PONG.
-  if (helmetOnline &&
-      now - lastHelmetPong > 6000) {
-
-    helmetOnline = false;
-
-    drawNodeStatus(20, "HELMET", false);
-    Serial.println("HELMET: OFFLINE");
-  }
+    if (helmetOnline && now - lastHelmetPong > 6000) {
+        helmetOnline = false;
+        fanCommandPending = false;
+        fanStateKnown = false;
+        drawNodeStatus(20, "HELMET", false);
+        drawFanButton();
+        Serial.println("HELMET: OFFLINE");
+    }
 }
-
 
 void setup() {
     Serial.begin(115200);
@@ -358,43 +503,36 @@ void setup() {
     Serial.println("SYSTEM: READY");
 }
 
-
 void loop() {
     updateHelmetRadio();
-    // Press S in Serial Monitor for live radio status.
+
+    // Serial Monitor controls: S=status, 1=fan on, 0=fan off.
     if (Serial.available() > 0) {
-        char command = Serial.read();
-
-        if (command == 's' || command == 'S') {
-            Serial.println();
+        char key = Serial.read();
+        if (key == 's' || key == 'S') {
             Serial.println("=== NCR RADIO STATUS ===");
-
-            Serial.printf("ESP-NOW: %s\n",
-                radioReady ? "ONLINE" : "OFFLINE");
-
+            Serial.printf("ESP-NOW: %s\n", radioReady ? "ONLINE" : "OFFLINE");
             uint8_t channel = 0;
             wifi_second_chan_t secondary = WIFI_SECOND_CHAN_NONE;
-
             if (radioReady &&
-                esp_wifi_get_channel(&channel, &secondary) == ESP_OK) {
+                esp_wifi_get_channel(&channel, &secondary) == ESP_OK)
                 Serial.printf("CHANNEL: %u\n", (unsigned)channel);
-            } else {
+            else
                 Serial.println("CHANNEL: UNAVAILABLE");
-            }
-
             Serial.print("MAC: ");
             Serial.println(WiFi.macAddress());
-
-            Serial.printf(
-            "HELMET: %s\n",
-            helmetOnline ? "ONLINE" : "OFFLINE"
-            );
+            Serial.printf("HELMET: %s\n", helmetOnline ? "ONLINE" : "OFFLINE");
+            Serial.printf("FAN: %s\n", fanCommandPending ? "WAITING FOR ACK" :
+                          (fanStateKnown ? (helmetFanOn ? "ON" : "OFF") : "UNKNOWN"));
             Serial.println("========================");
+        } else if (key == '1') {
+            sendHelmetFanCommand(true);
+        } else if (key == '0') {
+            sendHelmetFanCommand(false);
         }
     }
 
     if (millis() - lastTouchRead < 40) return;
-
     lastTouchRead = millis();
 
     int touchX = 0;
