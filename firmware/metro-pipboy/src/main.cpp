@@ -213,6 +213,128 @@ void initRadio() {
     Serial.println("------------------------");
 }
 
+
+//
+// DIRECT HELMET ESP-NOW LINK
+//
+
+const uint8_t HELMET_BROADCAST[6] = {
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
+volatile bool helmetPongPending = false;
+bool helmetProbeReady = false;
+
+unsigned long lastHelmetPing = 0;
+unsigned long lastHelmetPong = 0;
+
+// Called by the ESP-NOW Wi-Fi task.
+// Keep this callback short.
+void onHelmetReceive(
+  const esp_now_recv_info_t *info,
+  const uint8_t *data,
+  int len
+) {
+  if (data != nullptr &&
+      len >= 4 &&
+      memcmp(data, "PONG", 4) == 0) {
+
+    helmetPongPending = true;
+  }
+}
+
+void startHelmetProbe() {
+
+  if (!radioReady) {
+    Serial.println("HELMET: RADIO NOT READY");
+    return;
+  }
+
+  esp_err_t result =
+    esp_now_register_recv_cb(onHelmetReceive);
+
+  if (result != ESP_OK) {
+    Serial.printf("HELMET RX ERROR: %d\n", (int)result);
+    return;
+  }
+
+  esp_now_peer_info_t peer = {};
+
+  memcpy(
+    peer.peer_addr,
+    HELMET_BROADCAST,
+    6
+  );
+
+  peer.channel = ESPNOW_CHANNEL;
+  peer.ifidx = WIFI_IF_STA;
+  peer.encrypt = false;
+
+  result = esp_now_add_peer(&peer);
+
+  if (result != ESP_OK &&
+      result != ESP_ERR_ESPNOW_EXIST) {
+    Serial.printf("HELMET PEER ERROR: %d\n", (int)result);
+    return;
+  }
+
+  helmetProbeReady = true;
+  Serial.println("HELMET: PROBE READY");
+}
+
+void updateHelmetRadio() {
+
+  if (!helmetProbeReady) return;
+
+  unsigned long now = millis();
+
+  // Process received response outside callback.
+  if (helmetPongPending) {
+
+    helmetPongPending = false;
+    lastHelmetPong = now;
+
+    Serial.println("HELMET <- PONG");
+
+    if (!helmetOnline) {
+      helmetOnline = true;
+
+      drawNodeStatus(20, "HELMET", true);
+      Serial.println("HELMET: ONLINE");
+    }
+  }
+
+  // Send PING every 2 seconds.
+  if (now - lastHelmetPing >= 2000) {
+
+    lastHelmetPing = now;
+
+    const char message[] = "PING";
+
+    esp_err_t result = esp_now_send(
+      HELMET_BROADCAST,
+      (const uint8_t *)message,
+      sizeof(message)
+    );
+
+    Serial.printf(
+      "METRO -> HELMET PING: %d\n",
+      (int)result
+    );
+  }
+
+  // Mark offline after 6 seconds without PONG.
+  if (helmetOnline &&
+      now - lastHelmetPong > 6000) {
+
+    helmetOnline = false;
+
+    drawNodeStatus(20, "HELMET", false);
+    Serial.println("HELMET: OFFLINE");
+  }
+}
+
+
 void setup() {
     Serial.begin(115200);
     analogReadResolution(10);
@@ -232,11 +354,13 @@ void setup() {
     Serial.println("DISPLAY: ONLINE");
     Serial.println("TOUCH: READY");
     initRadio();
+    startHelmetProbe();
     Serial.println("SYSTEM: READY");
 }
 
 
 void loop() {
+    updateHelmetRadio();
     // Press S in Serial Monitor for live radio status.
     if (Serial.available() > 0) {
         char command = Serial.read();
@@ -261,7 +385,10 @@ void loop() {
             Serial.print("MAC: ");
             Serial.println(WiFi.macAddress());
 
-            Serial.println("HELMET: NOT LINKED YET");
+            Serial.printf(
+            "HELMET: %s\n",
+            helmetOnline ? "ONLINE" : "OFFLINE"
+            );
             Serial.println("========================");
         }
     }
