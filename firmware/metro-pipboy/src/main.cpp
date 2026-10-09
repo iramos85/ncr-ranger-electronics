@@ -1,6 +1,6 @@
 // NCR Ranger Pip-Boy / Adafruit Metro ESP32-S3
 // Native ESP-NOW helmet link, authenticated by learned sender MAC (not cryptographic).
-// Includes physical fan button, unicast control, and confirmed fan state.
+// Includes fan controls and TRACKING-linked helmet lenses over ESP-NOW.
 // Based on the verified ILI9486 + ADC1 touch + channel 6 Pip-Boy firmware.
 
 #include <Arduino.h>
@@ -78,7 +78,18 @@ bool fanCommandPending = false;
 bool requestedFanOn = false;
 unsigned long fanCommandSentAt = 0;
 
-// handleTouch() precedes the radio implementation below.
+// Helmet lens outputs follow TRACKING mode, never a separate UI button.
+// trackingActive is the desired mode; the Feather ACK confirms the hardware state.
+bool helmetLensesOn = false;
+bool lensStateKnown = false;
+bool lensCommandPending = false;
+bool requestedLensesOn = false;
+bool lensSyncRequired = true;   // Reconcile lenses OFF after initial connection.
+unsigned long lensCommandSentAt = 0;
+uint8_t lensCommandAttempts = 0;
+const uint8_t MAX_LENS_ATTEMPTS = 3;
+
+// handleTouch() precedes radio implementation below.
 void sendHelmetFanCommand(bool turnOn);
 
 bool touchWasDown = false;
@@ -180,14 +191,21 @@ bool insideButton(int px, int py,
     return (px >= x && px < x + w && py >= y && py < y + h);
 }
 
+void setTrackingMode(bool enabled) {
+    if (trackingActive == enabled) return;
+    trackingActive = enabled;
+    lensSyncRequired = true;
+    lensCommandAttempts = 0;
+    Serial.println(trackingActive ?
+                   "EVENT: TRACKING_START" : "EVENT: TRACKING_STOP");
+    drawScreen();
+}
+
 void handleTouch(int x, int y) {
     Serial.printf("TOUCH: X=%d Y=%d\n", x, y);
 
     if (insideButton(x, y, TRACK_X, TRACK_Y, TRACK_W, TRACK_H)) {
-        trackingActive = !trackingActive;
-        Serial.println(trackingActive ?
-                       "EVENT: TRACKING_START" : "EVENT: TRACKING_STOP");
-        drawScreen();
+        setTrackingMode(!trackingActive);
         return;
     }
     if (insideButton(x, y, LIGHT_X, LIGHT_Y, LIGHT_W, LIGHT_H)) {
@@ -272,6 +290,9 @@ uint8_t rxPongMac[6] = {0};
 uint8_t rxFanReply = 0;
 uint8_t rxFanMac[6] = {0};
 // Fan reply: 1=FAN_ON_OK, 2=FAN_OFF_OK, 3=FAN_ON, 4=FAN_OFF
+uint8_t rxLensReply = 0;
+uint8_t rxLensMac[6] = {0};
+// Lens reply: 1=LENS_ON_OK, 2=LENS_OFF_OK; 3/4=LENS_ON/LENS_OFF.
 
 void onHelmetReceive(const esp_now_recv_info_t *info,
                      const uint8_t *data, int len) {
@@ -301,6 +322,24 @@ void onHelmetReceive(const esp_now_recv_info_t *info,
         portENTER_CRITICAL(&helmetRxMux);
         memcpy(rxFanMac, info->src_addr, 6);
         rxFanReply = reply;
+        portEXIT_CRITICAL(&helmetRxMux);
+        return;
+    }
+
+    uint8_t lensReply = 0;
+    if (len >= (int)sizeof("LENS_ON_OK") &&
+        memcmp(data, "LENS_ON_OK", sizeof("LENS_ON_OK")) == 0) lensReply = 1;
+    else if (len >= (int)sizeof("LENS_OFF_OK") &&
+             memcmp(data, "LENS_OFF_OK", sizeof("LENS_OFF_OK")) == 0) lensReply = 2;
+    else if (len >= (int)sizeof("LENS_ON") &&
+             memcmp(data, "LENS_ON", sizeof("LENS_ON")) == 0) lensReply = 3;
+    else if (len >= (int)sizeof("LENS_OFF") &&
+             memcmp(data, "LENS_OFF", sizeof("LENS_OFF")) == 0) lensReply = 4;
+
+    if (lensReply != 0) {
+        portENTER_CRITICAL(&helmetRxMux);
+        memcpy(rxLensMac, info->src_addr, 6);
+        rxLensReply = lensReply;
         portEXIT_CRITICAL(&helmetRxMux);
     }
 }
@@ -390,6 +429,32 @@ void sendHelmetFanCommand(bool turnOn) {
     }
 }
 
+// Called only to enforce the requested TRACKING state.
+// The serial 2/3 shortcuts also set TRACKING instead of overriding lenses.
+void sendHelmetLensCommand(bool turnOn) {
+    if (!radioReady || !helmetProbeReady ||
+        !helmetOnline || !helmetPeerReady || !helmetMacKnown ||
+        lensCommandPending || lensCommandAttempts >= MAX_LENS_ATTEMPTS) return;
+
+    const char *command = turnOn ? "LENS_ON" : "LENS_OFF";
+    lensCommandPending = true;
+    requestedLensesOn = turnOn;
+    lensCommandSentAt = millis();
+    lensCommandAttempts++;
+    lensSyncRequired = false;
+
+    esp_err_t result = esp_now_send(
+        helmetMac, (const uint8_t *)command, strlen(command) + 1);
+
+    if (result != ESP_OK) {
+        lensCommandPending = false;
+        lensSyncRequired = true;
+        Serial.printf("HELMET LENSES: SEND ERROR %d\n", (int)result);
+    } else {
+        Serial.printf("METRO -> HELMET: %s (QUEUED, UNICAST)\n", command);
+    }
+}
+
 void updateHelmetRadio() {
     if (!helmetProbeReady) return;
     unsigned long now = millis();
@@ -399,6 +464,8 @@ void updateHelmetRadio() {
     uint8_t pongMac[6];
     uint8_t fanReply;
     uint8_t replyMac[6];
+    uint8_t lensReply;
+    uint8_t lensReplyMac[6];
     portENTER_CRITICAL(&helmetRxMux);
     gotPong = rxPongPending;
     memcpy(pongMac, rxPongMac, 6);
@@ -406,6 +473,9 @@ void updateHelmetRadio() {
     fanReply = rxFanReply;
     memcpy(replyMac, rxFanMac, 6);
     rxFanReply = 0;
+    lensReply = rxLensReply;
+    memcpy(lensReplyMac, rxLensMac, 6);
+    rxLensReply = 0;
     portEXIT_CRITICAL(&helmetRxMux);
 
     if (gotPong) {
@@ -425,6 +495,12 @@ void updateHelmetRadio() {
                 Serial.println("HELMET <- PONG: ONLINE");
                 if (!helmetPeerReady) helmetPeerReady = registerHelmetPeer();
                 queryHelmetFanStatus();
+                // On boot/reconnect, push desired tracking state to Feather.
+                // This also switches stray lenses OFF if TRACKING is OFF.
+                lensCommandPending = false;
+                lensStateKnown = false;
+                lensSyncRequired = true;
+                lensCommandAttempts = 0;
             }
         }
     }
@@ -453,6 +529,42 @@ void updateHelmetRadio() {
         }
     }
 
+    if (lensReply != 0 && helmetOnline && helmetMacKnown &&
+        memcmp(lensReplyMac, helmetMac, 6) == 0) {
+        if (lensReply == 1 || lensReply == 2) {
+            bool reportedOn = (lensReply == 1);
+            if (lensCommandPending && reportedOn == requestedLensesOn) {
+                lensCommandPending = false;
+                lensStateKnown = true;
+                helmetLensesOn = reportedOn;
+                Serial.printf("HELMET ACK: LENS_%s_OK\n",
+                              reportedOn ? "ON" : "OFF");
+                if (reportedOn != trackingActive) {
+                    // User changed tracking mode while previous command was in flight.
+                    lensSyncRequired = true;
+                    lensCommandAttempts = 0;
+                }
+            } else {
+                Serial.println("HELMET: OUT-OF-ORDER LENS ACK IGNORED");
+            }
+        }
+    }
+
+    // Retry missing ACKs (up to three attempts) rather than assume success.
+    if (lensCommandPending && now - lensCommandSentAt >= 1500) {
+        lensCommandPending = false;
+        lensStateKnown = false;
+        lensSyncRequired = (lensCommandAttempts < MAX_LENS_ATTEMPTS);
+        Serial.println(lensSyncRequired ?
+                       "HELMET: LENS ACK TIMEOUT - RETRYING" :
+                       "HELMET: LENS ACK TIMEOUT - CHECK LENSES");
+    }
+
+    if (helmetOnline && helmetPeerReady && lensSyncRequired &&
+        !lensCommandPending && lensCommandAttempts < MAX_LENS_ATTEMPTS) {
+        sendHelmetLensCommand(trackingActive);
+    }
+
     if (now - lastHelmetPing >= 2000) {
         lastHelmetPing = now;
         const char ping[] = "PING";
@@ -474,6 +586,9 @@ void updateHelmetRadio() {
         helmetOnline = false;
         fanCommandPending = false;
         fanStateKnown = false;
+        lensCommandPending = false;
+        lensStateKnown = false;
+        lensSyncRequired = true;
         drawNodeStatus(20, "HELMET", false);
         drawFanButton();
         Serial.println("HELMET: OFFLINE");
@@ -506,7 +621,7 @@ void setup() {
 void loop() {
     updateHelmetRadio();
 
-    // Serial Monitor controls: S=status, 1=fan on, 0=fan off.
+    // Serial Monitor: S=status, 1/0=fan, 2/3=TRACKING on/off.
     if (Serial.available() > 0) {
         char key = Serial.read();
         if (key == 's' || key == 'S') {
@@ -524,11 +639,18 @@ void loop() {
             Serial.printf("HELMET: %s\n", helmetOnline ? "ONLINE" : "OFFLINE");
             Serial.printf("FAN: %s\n", fanCommandPending ? "WAITING FOR ACK" :
                           (fanStateKnown ? (helmetFanOn ? "ON" : "OFF") : "UNKNOWN"));
+            Serial.printf("TRACKING: %s\n", trackingActive ? "ON" : "OFF");
+            Serial.printf("LENSES: %s\n", lensCommandPending ? "WAITING FOR ACK" :
+                          (lensStateKnown ? (helmetLensesOn ? "ON" : "OFF") : "UNKNOWN"));
             Serial.println("========================");
         } else if (key == '1') {
             sendHelmetFanCommand(true);
         } else if (key == '0') {
             sendHelmetFanCommand(false);
+        } else if (key == '2') {
+            setTrackingMode(true);   // Tracking ON -> lenses ON
+        } else if (key == '3') {
+            setTrackingMode(false);  // Tracking OFF -> lenses OFF
         }
     }
 
