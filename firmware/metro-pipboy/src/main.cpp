@@ -99,6 +99,18 @@ unsigned long lastTouchRead = 0;
 const uint8_t ESPNOW_CHANNEL = 6;
 bool radioReady = false;
 
+// ======================================================
+// AUDIO NODE CONFIGURATION
+// ======================================================
+
+const uint8_t AUDIO_MAC[6] = {
+    0xC8, 0x2E, 0x18, 0x5F, 0x00, 0x6C
+};
+
+bool audioPeerReady = false;
+unsigned long lastAudioPing = 0;
+unsigned long lastAudioPong = 0;
+
 void drawButton(int x, int y, int w, int h,
                 const char *label, uint16_t color) {
     gfx->fillRect(x, y, w, h, NCR_BLACK);
@@ -287,6 +299,9 @@ unsigned long lastHelmetPong = 0;
 portMUX_TYPE helmetRxMux = portMUX_INITIALIZER_UNLOCKED;
 bool rxPongPending = false;
 uint8_t rxPongMac[6] = {0};
+// Audio node response mailbox
+bool rxAudioPongPending = false;
+uint8_t rxAudioPongMac[6] = {0};
 uint8_t rxFanReply = 0;
 uint8_t rxFanMac[6] = {0};
 // Fan reply: 1=FAN_ON_OK, 2=FAN_OFF_OK, 3=FAN_ON, 4=FAN_OFF
@@ -298,7 +313,26 @@ void onHelmetReceive(const esp_now_recv_info_t *info,
                      const uint8_t *data, int len) {
     if (info == nullptr || info->src_addr == nullptr || data == nullptr)
         return;
+    // ======================================================
+// AUDIO NODE DISCOVERY
+// ======================================================
 
+if (len == (int)sizeof("AUDIO_PONG") &&
+    memcmp(data, "AUDIO_PONG", sizeof("AUDIO_PONG")) == 0) {
+
+    // Only accept messages from our known audio ESP32.
+    if (memcmp(info->src_addr, AUDIO_MAC, 6) != 0)
+        return;
+
+    portENTER_CRITICAL(&helmetRxMux);
+
+    memcpy(rxAudioPongMac, info->src_addr, 6);
+    rxAudioPongPending = true;
+
+    portEXIT_CRITICAL(&helmetRxMux);
+
+    return;
+}                   
     if (len >= (int)sizeof("PONG") &&
         memcmp(data, "PONG", sizeof("PONG")) == 0) {
         portENTER_CRITICAL(&helmetRxMux);
@@ -462,6 +496,8 @@ void updateHelmetRadio() {
     // Atomically take the callback mailbox.
     bool gotPong;
     uint8_t pongMac[6];
+    bool gotAudioPong;
+    uint8_t audioPongMac[6];
     uint8_t fanReply;
     uint8_t replyMac[6];
     uint8_t lensReply;
@@ -470,6 +506,9 @@ void updateHelmetRadio() {
     gotPong = rxPongPending;
     memcpy(pongMac, rxPongMac, 6);
     rxPongPending = false;
+    gotAudioPong = rxAudioPongPending;
+    memcpy(audioPongMac, rxAudioPongMac, 6);
+    rxAudioPongPending = false;
     fanReply = rxFanReply;
     memcpy(replyMac, rxFanMac, 6);
     rxFanReply = 0;
@@ -477,6 +516,22 @@ void updateHelmetRadio() {
     memcpy(lensReplyMac, rxLensMac, 6);
     rxLensReply = 0;
     portEXIT_CRITICAL(&helmetRxMux);
+    // ======================================================
+// AUDIO NODE STATUS
+// ======================================================
+
+if (gotAudioPong &&
+    memcmp(audioPongMac, AUDIO_MAC, 6) == 0) {
+
+    lastAudioPong = now;
+
+    if (!audioOnline) {
+        audioOnline = true;
+
+        Serial.println("AUDIO <- AUDIO_PONG: ONLINE");
+        drawNodeStatus(350, "AUDIO", true);
+    }
+}
 
     if (gotPong) {
         if (!helmetMacKnown) {
@@ -593,6 +648,13 @@ void updateHelmetRadio() {
         drawFanButton();
         Serial.println("HELMET: OFFLINE");
     }
+    // Audio node timeout
+if (audioOnline && now - lastAudioPong > 6000) {
+    audioOnline = false;
+
+    drawNodeStatus(350, "AUDIO", false);
+    Serial.println("AUDIO: OFFLINE");
+}
 }
 
 void setup() {
