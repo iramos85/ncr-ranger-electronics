@@ -1,3 +1,4 @@
+
 #include <cstring>
 #include <Arduino.h>
 #include <Audio.h>
@@ -25,12 +26,12 @@ AudioEffectBitcrusher  bitcrusher;
 
 AudioEffectGranular    pitchShift;
 AudioEffectDelay       pitchDelay;
-
+AudioPlaySdWav         sfxPlayer;
+AudioMixer4            outputMixer;
 AudioMixer4            finalMixer;
 
 AudioOutputI2S         audioOutput;
 AudioControlSGTL5000   audioShield;
-
 
 // ======================================================
 // ROUTING
@@ -55,37 +56,113 @@ AudioConnection patch7(pitchShift, 0, finalMixer, 2);
 AudioConnection patch8(pitchShift, 0, pitchDelay, 0);
 AudioConnection patch9(pitchDelay, 0, finalMixer, 3);
 
-// Output
-AudioConnection patch10(finalMixer, 0, audioOutput, 0);
-AudioConnection patch11(finalMixer, 0, audioOutput, 1);
+// Voice and SFX output
+AudioConnection patch10(finalMixer, 0, outputMixer, 0);
+AudioConnection patch11(sfxPlayer, 0, outputMixer, 1);
+AudioConnection patch12(sfxPlayer, 1, outputMixer, 2);
+
+AudioConnection patch13(outputMixer, 0, audioOutput, 0);
+AudioConnection patch14(outputMixer, 0, audioOutput, 1);
 
 // ======================================================
-// ESP32 COMMAND INTERFACE
+// ESP32 COMMAND INTERFACE / SD DIAGNOSTICS
 // ======================================================
 
 constexpr uint32_t UART_BAUD = 115200;
 
-const float voiceGains[4] = {0.45, 0.15, 0.30, 0.08};
+const char SFX_FILENAME[] = "TEST.WAV";
+
+const float voiceGains[4] = {
+  0.45, 0.15, 0.30, 0.08
+};
 
 char commandBuffer[64];
 size_t commandLength = 0;
 
+bool codecReady = false;
+bool sdReady = false;
+
+// ======================================================
+// VOICE CONTROL
+// ======================================================
+
 void setVoiceEnabled(bool enabled) {
   for (int i = 0; i < 4; i++) {
-    finalMixer.gain(i, enabled ? voiceGains[i] : 0.0f);
+    finalMixer.gain(
+      i,
+      enabled ? voiceGains[i] : 0.0f
+    );
   }
 }
 
-bool codecReady = false;
+// ======================================================
+// DIAGNOSTIC REPORTING
+// ======================================================
+
+// Reports to both Mac USB and audio ESP32 UART.
+void reportSfxStatus(const char *message) {
+  Serial.println(message);
+  Serial1.println(message);
+}
+
+// ======================================================
+// SFX PLAYBACK
+// ======================================================
+
+void playTestSfx() {
+
+  // Check SD initialization
+  if (!sdReady) {
+    reportSfxStatus("SD_NOT_READY");
+    return;
+  }
+
+  // Check that TEST.WAV exists
+  if (!SD.exists(SFX_FILENAME)) {
+    reportSfxStatus("SFX_FILE_MISSING");
+    return;
+  }
+
+  reportSfxStatus("SFX_FILE_FOUND");
+
+  // Stop previous playback if button pressed again
+  if (sfxPlayer.isPlaying()) {
+    sfxPlayer.stop();
+  }
+
+  // Attempt playback
+  if (!sfxPlayer.play(SFX_FILENAME)) {
+    reportSfxStatus("SFX_PLAY_FAILED");
+    return;
+  }
+
+  reportSfxStatus("SFX_PLAYING");
+
+  // Give WAV decoder time to process the file
+  delay(100);
+
+  if (sfxPlayer.isPlaying()) {
+    reportSfxStatus("SFX_DECODING");
+  } else {
+    reportSfxStatus("SFX_STOPPED_EARLY");
+  }
+}
+
+// ======================================================
+// ESP32 COMMAND HANDLER
+// ======================================================
 
 void handleCommand(const char* command) {
+
   if (strcmp(command, "PING") == 0) {
     Serial1.println("AUDIO_READY");
 
- } else if (strcmp(command, "STATUS") == 0) {
-  Serial1.println(codecReady
-    ? "RANGER_VOICE_3C_READY"
-    : "AUDIO_CODEC_FAILED");
+  } else if (strcmp(command, "STATUS") == 0) {
+    Serial1.println(
+      codecReady
+        ? "RANGER_VOICE_3C_READY"
+        : "AUDIO_CODEC_FAILED"
+    );
 
   } else if (strcmp(command, "VOICE_ON") == 0) {
     setVoiceEnabled(true);
@@ -96,7 +173,9 @@ void handleCommand(const char* command) {
     Serial1.println("VOICE_OFF_OK");
 
   } else if (strcmp(command, "SFX_TEST") == 0) {
-    Serial1.println("SFX_NOT_CONFIGURED");
+
+    // Same diagnostic for wireless and USB requests
+    playTestSfx();
 
   } else {
     Serial1.println("UNKNOWN_COMMAND");
@@ -108,21 +187,49 @@ void handleCommand(const char* command) {
 // ======================================================
 
 void setup() {
+
   Serial.begin(115200);
   Serial1.begin(UART_BAUD);
+
   delay(1000);
 
   AudioMemory(120);
 
+  // --------------------------------------------------
+  // SD CARD
+  // --------------------------------------------------
+
+  sdReady = SD.begin(BUILTIN_SDCARD);
+
+  Serial.print("SD CARD: ");
+  Serial.println(
+    sdReady ? "READY" : "FAILED"
+  );
+
+  // --------------------------------------------------
+  // OUTPUT MIXER
+  // --------------------------------------------------
+
+  outputMixer.gain(0, 0.75f); // Voice
+  outputMixer.gain(1, 0.45f); // SFX left
+  outputMixer.gain(2, 0.45f); // SFX right
+  outputMixer.gain(3, 0.0f);
+
+  // --------------------------------------------------
+  // AUDIO CODEC
+  // --------------------------------------------------
+
   codecReady = audioShield.enable();
 
-if (codecReady) {
-  audioShield.muteLineout();
-  audioShield.lineOutLevel(29);
-}
+  if (codecReady) {
+    audioShield.muteLineout();
+    audioShield.lineOutLevel(29);
+  }
 
   Serial.print("SGTL5000: ");
-  Serial.println(codecReady ? "OK" : "FAILED");
+  Serial.println(
+    codecReady ? "OK" : "FAILED"
+  );
 
   // --------------------------------------------------
   // INPUT
@@ -131,22 +238,19 @@ if (codecReady) {
   audioShield.inputSelect(AUDIO_INPUT_LINEIN);
   audioShield.lineInLevel(0);
 
-
   // --------------------------------------------------
   // RADIO SHAPING
   // --------------------------------------------------
 
-highPass.setHighpass(0, 180, 0.707);
-lowPass.setLowpass(0, 3800, 0.707);
-
+  highPass.setHighpass(0, 180, 0.707);
+  lowPass.setLowpass(0, 3800, 0.707);
 
   // --------------------------------------------------
   // DIGITAL GRIT
   // --------------------------------------------------
 
-bitcrusher.bits(11);
-bitcrusher.sampleRate(14000);
-
+  bitcrusher.bits(11);
+  bitcrusher.sampleRate(14000);
 
   // --------------------------------------------------
   // PITCH DISGUISE
@@ -157,47 +261,52 @@ bitcrusher.sampleRate(14000);
   // Short grains keep latency reasonable
   pitchShift.beginPitchShift(25);
 
-  // 0.84 = roughly 3 semitones lower
+  // Lower voice
   pitchShift.setSpeed(0.84);
 
   // Slightly separate the doubled low voice
   pitchDelay.delay(0, 18);
 
+  // --------------------------------------------------
+  // VOICE MIX
+  // --------------------------------------------------
+
+  finalMixer.gain(0, 0.45);
+  finalMixer.gain(1, 0.15);
+  finalMixer.gain(2, 0.30);
+  finalMixer.gain(3, 0.08);
 
   // --------------------------------------------------
-  // MIX
+  // OUTPUT
   // --------------------------------------------------
 
-// Recognizable/intelligible core
-finalMixer.gain(0, 0.45);
+  if (codecReady) {
+    audioShield.unmuteLineout();
+  }
 
-// Radio grit
-finalMixer.gain(1, 0.15);
-
-// Lower disguise voice
-finalMixer.gain(2, 0.30);
-
-// Quiet delayed lower voice
-finalMixer.gain(3, 0.08);
-
-// --------------------------------------------------
-// OUTPUT
-// --------------------------------------------------
-
-if (codecReady) {
-  audioShield.unmuteLineout();
+  Serial.println(
+    codecReady
+      ? "RANGER VOICE 3c ACTIVE"
+      : "RANGER VOICE 3c CODEC ERROR"
+  );
 }
 
-Serial.println(codecReady
-  ? "RANGER VOICE 3c ACTIVE"
-  : "RANGER VOICE 3c CODEC ERROR");
-}
+// ======================================================
+// LOOP
+// ======================================================
 
 void loop() {
+
+  // --------------------------------------------------
+  // ESP32 UART COMMANDS
+  // --------------------------------------------------
+
   while (Serial1.available()) {
-    char c = Serial1.read();
+
+    char c = static_cast<char>(Serial1.read());
 
     if (c == '\n') {
+
       commandBuffer[commandLength] = '\0';
 
       if (commandLength > 0) {
@@ -207,11 +316,30 @@ void loop() {
       commandLength = 0;
 
     } else if (c != '\r') {
+
       if (commandLength < sizeof(commandBuffer) - 1) {
         commandBuffer[commandLength++] = c;
       } else {
         commandLength = 0;
       }
+    }
+  }
+
+  // --------------------------------------------------
+  // USB SERIAL DIAGNOSTIC
+  // --------------------------------------------------
+
+  if (Serial.available()) {
+
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+
+    if (command == "SFX_TEST") {
+
+      Serial.println("USB: SFX_TEST");
+
+      // Call the exact same handler as the ESP32
+      playTestSfx();
     }
   }
 }

@@ -91,6 +91,7 @@ const uint8_t MAX_LENS_ATTEMPTS = 3;
 
 // handleTouch() precedes radio implementation below.
 void sendHelmetFanCommand(bool turnOn);
+void sendAudioTestCommand();
 
 bool touchWasDown = false;
 uint8_t releaseSamples = 0;
@@ -213,6 +214,7 @@ void setTrackingMode(bool enabled) {
     drawScreen();
 }
 
+
 void handleTouch(int x, int y) {
     Serial.printf("TOUCH: X=%d Y=%d\n", x, y);
 
@@ -220,6 +222,7 @@ void handleTouch(int x, int y) {
         setTrackingMode(!trackingActive);
         return;
     }
+
     if (insideButton(x, y, LIGHT_X, LIGHT_Y, LIGHT_W, LIGHT_H)) {
         cannonLightActive = !cannonLightActive;
         Serial.println(cannonLightActive ?
@@ -227,12 +230,15 @@ void handleTouch(int x, int y) {
         drawScreen();
         return;
     }
+
     if (insideButton(x, y, SFX_X, SFX_Y, SFX_W, SFX_H)) {
         Serial.println("EVENT: SFX_TEST");
+        sendAudioTestCommand();
         return;
     }
+
     if (insideButton(x, y, FAN_X, FAN_Y, FAN_W, FAN_H)) {
-        // If status is unknown, request ON and await acknowledgement.
+        // Preserve existing helmet fan behavior.
         sendHelmetFanCommand(fanStateKnown ? !helmetFanOn : true);
         return;
     }
@@ -404,25 +410,75 @@ void startHelmetProbe() {
     Serial.println("HELMET: PROBE READY");
 }
 
+
 bool registerHelmetPeer() {
     if (!helmetMacKnown) return false;
     if (esp_now_is_peer_exist(helmetMac)) return true;
+
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, helmetMac, 6);
     peer.channel = ESPNOW_CHANNEL;
     peer.ifidx = WIFI_IF_STA;
     peer.encrypt = false;
+
     esp_err_t result = esp_now_add_peer(&peer);
+
     if (result != ESP_OK && result != ESP_ERR_ESPNOW_EXIST) {
         Serial.printf("HELMET UNICAST PEER ERROR: %d\n", (int)result);
         return false;
     }
+
     Serial.printf("HELMET MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
                   helmetMac[0], helmetMac[1], helmetMac[2],
                   helmetMac[3], helmetMac[4], helmetMac[5]);
+
     Serial.println("HELMET: UNICAST READY");
     return true;
 }
+
+// ======================================================
+// AUDIO NODE — SEND SFX COMMAND
+// ======================================================
+
+void sendAudioTestCommand() {
+    if (!radioReady || !audioOnline) {
+        Serial.println("SFX: AUDIO NODE OFFLINE");
+        return;
+    }
+
+    if (!esp_now_is_peer_exist(AUDIO_MAC)) {
+        esp_now_peer_info_t peer = {};
+
+        memcpy(peer.peer_addr, AUDIO_MAC, 6);
+        peer.channel = ESPNOW_CHANNEL;
+        peer.ifidx = WIFI_IF_STA;
+        peer.encrypt = false;
+
+        esp_err_t result = esp_now_add_peer(&peer);
+
+        if (result != ESP_OK &&
+            result != ESP_ERR_ESPNOW_EXIST) {
+            Serial.printf("AUDIO PEER ERROR: %d\n", (int)result);
+            return;
+        }
+    }
+
+    audioPeerReady = true;
+
+    const char command[] = "SFX_TEST";
+
+    esp_err_t result = esp_now_send(
+        AUDIO_MAC,
+        (const uint8_t*)command,
+        sizeof(command)
+    );
+
+    Serial.printf(
+        "METRO -> AUDIO: SFX_TEST %s\n",
+        result == ESP_OK ? "QUEUED" : "FAILED"
+    );
+}
+
 
 void queryHelmetFanStatus() {
     if (!helmetOnline || !helmetPeerReady) return;
