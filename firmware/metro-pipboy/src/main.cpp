@@ -9,6 +9,8 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <time.h>
+#include <sys/time.h>
 
 #define NCR_BLACK       0x0000
 #define NCR_GREEN       0x07E0
@@ -21,7 +23,10 @@ Arduino_DataBus *bus = new Arduino_SWPAR8(
     A2, A3, A1, A0,
     8, 9, 2, 3, 4, 5, 6, 7
 );
-Arduino_GFX *gfx = new Arduino_ILI9486(bus, A4, 1, false);
+constexpr uint8_t SCREEN_ROTATION = 3;
+constexpr int SCREEN_WIDTH = 480;
+constexpr int SCREEN_HEIGHT = 320;
+Arduino_GFX *gfx = new Arduino_ILI9486(bus, A4, SCREEN_ROTATION, false);
 
 // Original physical touchscreen wiring on the parallel TFT shield.
 #define XP 8
@@ -33,36 +38,36 @@ Arduino_GFX *gfx = new Arduino_ILI9486(bus, A4, 1, false);
 // Leave these in this order -- the standard constructor conflicted with Wi-Fi.
 TouchScreen ts(XM, YM, XP, YP, 300);
 
-// Starting calibration from the successful reversed-electrode test.
-#define TS_LEFT   141
-#define TS_RIGHT  774
-#define TS_TOP    241
-#define TS_BOTTOM 573
+// Calibrated from four physical touchscreen samples.
+// Includes an estimated margin for touches inside the edges.
+constexpr int TS_RAW_LEFT   = 865;
+constexpr int TS_RAW_RIGHT  = 157;
+constexpr int TS_RAW_TOP    = 829;
+constexpr int TS_RAW_BOTTOM = 223;
+
+// Approximate on-screen positions of calibration touches.
+constexpr int CAL_X_LEFT   = 35;
+constexpr int CAL_X_RIGHT  = 445;
+constexpr int CAL_Y_TOP    = 30;
+constexpr int CAL_Y_BOTTOM = 290;
 
 #define MINPRESSURE 80
 #define MAXPRESSURE 2000
 
-// Original UNO layout in 480x320 landscape coordinates.
-const int TRACK_X = 20;
-const int TRACK_Y = 80;
-const int TRACK_W = 205;
-const int TRACK_H = 75;
-
-const int LIGHT_X = 255;
-const int LIGHT_Y = 80;
-const int LIGHT_W = 205;
-const int LIGHT_H = 75;
-
-// Second row: SFX on left; helmet fan on right.
-const int SFX_X = 20;
-const int SFX_Y = 185;
-const int SFX_W = 205;
-const int SFX_H = 65;
-
-const int FAN_X = 255;
-const int FAN_Y = 185;
-const int FAN_W = 205;
-const int FAN_H = 65;
+// All interactive areas are within the existing calibrated touch Y span.
+// The bottom status strip is display-only.
+enum ScreenPage : uint8_t { PAGE_HOME, PAGE_HELMET, PAGE_CANNON, PAGE_AUDIO };
+ScreenPage currentPage = PAGE_HOME;
+const int TAB_Y = 82, TAB_H = 36, TAB_W = 110;
+const int TAB_X[4] = {8, 126, 244, 362};
+const int ACTION_X = 20, ACTION_Y = 143, ACTION_W = 440, ACTION_H = 60;
+const int HALF_W = 209;
+const int TRACK_X = 20, TRACK_Y = 143, TRACK_W = HALF_W, TRACK_H = 60;
+const int FAN_X = 251, FAN_Y = 143, FAN_W = HALF_W, FAN_H = 60;
+const int LIGHT_X = ACTION_X, LIGHT_Y = ACTION_Y, LIGHT_W = ACTION_W, LIGHT_H = ACTION_H;
+const int SFX_X = ACTION_X, SFX_Y = ACTION_Y, SFX_W = ACTION_W, SFX_H = ACTION_H;
+bool clockSet = false;  // No RTC/NTP source: time must be set after boot.
+unsigned long lastHomeClockDraw = 0;
 
 bool trackingActive = false;
 bool cannonLightActive = false;
@@ -116,59 +121,130 @@ void drawButton(int x, int y, int w, int h,
                 const char *label, uint16_t color) {
     gfx->fillRect(x, y, w, h, NCR_BLACK);
     gfx->drawRect(x, y, w, h, color);
-    gfx->drawRect(x + 3, y + 3, w - 6, h - 6, color);
+    gfx->drawRect(x + 2, y + 2, w - 4, h - 4, color);
     gfx->setTextColor(color);
     gfx->setTextSize(2);
-    gfx->setCursor(x + 15, y + 27);
+    // Text uses the small default 12px character advance at size 2.
+    int textW = (int)strlen(label) * 12;
+    gfx->setCursor(x + max(6, (w - textW) / 2), y + (h - 16) / 2);
     gfx->print(label);
 }
 
 void drawNodeStatus(int x, const char *label, bool online) {
-    gfx->fillRect(x, 275, 110, 42, NCR_BLACK);
+    gfx->fillRect(x, 271, 112, 45, NCR_BLACK);
     gfx->setTextSize(1);
     gfx->setTextColor(NCR_GRAY);
-    gfx->setCursor(x, 285);
+    gfx->setCursor(x, 278);
     gfx->print(label);
-    gfx->setCursor(x, 300);
+    gfx->setCursor(x, 296);
     gfx->setTextColor(online ? NCR_GREEN : NCR_AMBER);
     gfx->print(online ? "ONLINE" : "OFFLINE");
 }
 
 void drawFanButton() {
+    if (currentPage != PAGE_HELMET) return;
     if (!helmetOnline) {
         drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "FAN: OFFLINE", NCR_GRAY);
     } else if (fanCommandPending) {
-        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "HELMET FAN: ...", NCR_AMBER);
+        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "FAN: WAIT...", NCR_AMBER);
     } else if (!fanStateKnown) {
-        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "HELMET FAN: ?", NCR_GREEN);
+        drawButton(FAN_X, FAN_Y, FAN_W, FAN_H, "FAN: UNKNOWN", NCR_GREEN);
     } else {
         drawButton(FAN_X, FAN_Y, FAN_W, FAN_H,
-                   helmetFanOn ? "HELMET FAN: ON" : "HELMET FAN: OFF",
+                   helmetFanOn ? "FAN: ON" : "FAN: OFF",
                    helmetFanOn ? NCR_AMBER : NCR_GREEN);
     }
 }
 
+void drawHomeClock() {
+    if (currentPage != PAGE_HOME) return;
+    gfx->fillRect(12, 137, 456, 111, NCR_BLACK);
+    gfx->setTextSize(1);
+    gfx->setTextColor(NCR_GREEN);
+    gfx->setCursor(20, 137);
+    gfx->print("LOCAL SYSTEM CLOCK");
+    if (clockSet) {
+        time_t now = time(nullptr);
+        struct tm localNow;
+        localtime_r(&now, &localNow);
+        char dateBuf[32], timeBuf[32];
+        strftime(dateBuf, sizeof(dateBuf), "%a %b %d, %Y", &localNow);
+        strftime(timeBuf, sizeof(timeBuf), "%I:%M:%S %p", &localNow);
+        gfx->setTextSize(2);
+        gfx->setCursor(20, 156);
+        gfx->print(timeBuf);
+        gfx->setTextSize(1);
+        gfx->setCursor(20, 184);
+        gfx->print(dateBuf);
+    } else {
+        gfx->setTextColor(NCR_AMBER);
+        gfx->setTextSize(2);
+        gfx->setCursor(20, 156);
+        gfx->print("TIME NOT SET");
+        gfx->setTextSize(1);
+        gfx->setCursor(20, 184);
+        gfx->print("USB: TYYYY-MM-DD HH:MM:SS");
+    }
+    unsigned long total = millis() / 1000;
+    char uptime[50];
+    snprintf(uptime, sizeof(uptime), "UPTIME %02luh %02lum %02lus",
+             total / 3600, (total / 60) % 60, total % 60);
+    gfx->setTextColor(NCR_GRAY);
+    gfx->setCursor(20, 217);
+    gfx->print(uptime);
+}
+
 void drawScreen() {
     gfx->fillScreen(NCR_BLACK);
-    gfx->fillRect(0, 0, 480, 45, NCR_DARK_GREEN);
+    gfx->fillRect(0, 0, 480, 44, NCR_DARK_GREEN);
     gfx->setTextColor(NCR_GREEN);
     gfx->setTextSize(2);
-    gfx->setCursor(15, 14);
+    gfx->setCursor(12, 14);
     gfx->print("NCR RANGER // CONTROL");
     gfx->setTextSize(1);
-    gfx->setCursor(15, 58);
-    gfx->print("RANGER SYSTEM BUS // LOCAL CONTROL");
+    gfx->setCursor(12, 59);
+    gfx->print("SYSTEM BUS / ESP-NOW CH 6");
 
-    drawButton(TRACK_X, TRACK_Y, TRACK_W, TRACK_H,
-               trackingActive ? "TRACKING: ON" : "TRACKING: OFF",
-               trackingActive ? NCR_AMBER : NCR_GREEN);
-    drawButton(LIGHT_X, LIGHT_Y, LIGHT_W, LIGHT_H,
-               cannonLightActive ? "LIGHT: ON" : "LIGHT: OFF",
-               cannonLightActive ? NCR_AMBER : NCR_GREEN);
-    drawButton(SFX_X, SFX_Y, SFX_W, SFX_H,
-               "PLAY TEST SFX", NCR_GREEN);
-    drawFanButton();
+    const char *tabs[] = {"HOME", "HELMET", "CANNON", "AUDIO"};
+    for (int i = 0; i < 4; i++) {
+        const bool active = (int)currentPage == i;
+        gfx->fillRect(TAB_X[i], TAB_Y, TAB_W, TAB_H,
+                      active ? NCR_DARK_GREEN : NCR_BLACK);
+        gfx->drawRect(TAB_X[i], TAB_Y, TAB_W, TAB_H,
+                      active ? NCR_AMBER : NCR_GREEN);
+        gfx->setTextSize(1);
+        gfx->setTextColor(active ? NCR_AMBER : NCR_GREEN);
+        gfx->setCursor(TAB_X[i] + 12, TAB_Y + 14);
+        gfx->print(tabs[i]);
+    }
 
+    if (currentPage == PAGE_HOME) {
+        drawHomeClock();
+    } else if (currentPage == PAGE_HELMET) {
+        drawButton(TRACK_X, TRACK_Y, TRACK_W, TRACK_H,
+                   trackingActive ? "TRACKING: ON" : "TRACKING: OFF",
+                   trackingActive ? NCR_AMBER : NCR_GREEN);
+        drawFanButton();
+        gfx->setTextSize(1);
+        gfx->setTextColor(NCR_GRAY);
+        gfx->setCursor(20, 223);
+        gfx->print("TRACKING ALSO CONTROLS HELMET LENSES");
+    } else if (currentPage == PAGE_CANNON) {
+        drawButton(LIGHT_X, LIGHT_Y, LIGHT_W, LIGHT_H,
+                   cannonLightActive ? "LIGHT: ON" : "LIGHT: OFF",
+                   cannonLightActive ? NCR_AMBER : NCR_GREEN);
+        gfx->setTextSize(1);
+        gfx->setTextColor(NCR_GRAY);
+        gfx->setCursor(20, 223);
+        gfx->print("LIGHT CONTROL: LOCAL STATE ONLY");
+    } else if (currentPage == PAGE_AUDIO) {
+        drawButton(SFX_X, SFX_Y, SFX_W, SFX_H, "PLAY TEST SFX", NCR_GREEN);
+        gfx->setTextSize(1);
+        gfx->setTextColor(NCR_GRAY);
+        gfx->setCursor(20, 223);
+        gfx->print(audioOnline ? "AUDIO NODE LINKED" : "AUDIO NODE NOT LINKED");
+    }
+    gfx->drawFastHLine(12, 262, 456, NCR_DARK_GREEN);
     drawNodeStatus(20, "HELMET", helmetOnline);
     drawNodeStatus(180, "CANNON", cannonOnline);
     drawNodeStatus(350, "AUDIO", audioOnline);
@@ -192,10 +268,26 @@ bool readTouch(int &screenX, int &screenY) {
     TSPoint p = ts.getPoint();
     restoreLCDPins();
 
+    if (p.z >= MINPRESSURE && p.z <= MAXPRESSURE) 
+        {Serial.printf("RAW TOUCH: x=%d y=%d z=%d\n",
+                  p.x, p.y, p.z);
+        }
+
     if (p.z < MINPRESSURE || p.z > MAXPRESSURE) return false;
 
-    screenX = constrain(map(p.y, TS_LEFT, TS_RIGHT, 45, 435), 0, 479);
-    screenY = constrain(map(p.x, TS_TOP, TS_BOTTOM, 70, 210), 0, 319);
+  // Raw Y maps to screen X (left to right).
+screenX = constrain(
+    map(p.y, TS_RAW_LEFT, TS_RAW_RIGHT,
+        CAL_X_LEFT, CAL_X_RIGHT),
+    0, SCREEN_WIDTH - 1
+);
+
+// Raw X maps to screen Y (top to bottom).
+screenY = constrain(
+    map(p.x, TS_RAW_TOP, TS_RAW_BOTTOM,
+        CAL_Y_TOP, CAL_Y_BOTTOM),
+    0, SCREEN_HEIGHT - 1
+);
     return true;
 }
 
@@ -217,30 +309,33 @@ void setTrackingMode(bool enabled) {
 
 void handleTouch(int x, int y) {
     Serial.printf("TOUCH: X=%d Y=%d\n", x, y);
-
-    if (insideButton(x, y, TRACK_X, TRACK_Y, TRACK_W, TRACK_H)) {
-        setTrackingMode(!trackingActive);
-        return;
+    for (int i = 0; i < 4; i++) {
+        if (insideButton(x, y, TAB_X[i], TAB_Y, TAB_W, TAB_H)) {
+            if (currentPage != (ScreenPage)i) {
+                currentPage = (ScreenPage)i;
+                drawScreen();
+            }
+            return;
+        }
     }
-
-    if (insideButton(x, y, LIGHT_X, LIGHT_Y, LIGHT_W, LIGHT_H)) {
-        cannonLightActive = !cannonLightActive;
-        Serial.println(cannonLightActive ?
-                       "EVENT: CANNON_LIGHT_ON" : "EVENT: CANNON_LIGHT_OFF");
-        drawScreen();
-        return;
-    }
-
-    if (insideButton(x, y, SFX_X, SFX_Y, SFX_W, SFX_H)) {
-        Serial.println("EVENT: SFX_TEST");
-        sendAudioTestCommand();
-        return;
-    }
-
-    if (insideButton(x, y, FAN_X, FAN_Y, FAN_W, FAN_H)) {
-        // Preserve existing helmet fan behavior.
-        sendHelmetFanCommand(fanStateKnown ? !helmetFanOn : true);
-        return;
+    if (currentPage == PAGE_HELMET) {
+        if (insideButton(x, y, TRACK_X, TRACK_Y, TRACK_W, TRACK_H)) {
+            setTrackingMode(!trackingActive);
+        } else if (insideButton(x, y, FAN_X, FAN_Y, FAN_W, FAN_H)) {
+            sendHelmetFanCommand(fanStateKnown ? !helmetFanOn : true);
+        }
+    } else if (currentPage == PAGE_CANNON) {
+        if (insideButton(x, y, LIGHT_X, LIGHT_Y, LIGHT_W, LIGHT_H)) {
+            cannonLightActive = !cannonLightActive;
+            Serial.println(cannonLightActive ?
+                           "EVENT: CANNON_LIGHT_ON" : "EVENT: CANNON_LIGHT_OFF");
+            drawScreen();
+        }
+    } else if (currentPage == PAGE_AUDIO) {
+        if (insideButton(x, y, SFX_X, SFX_Y, SFX_W, SFX_H)) {
+            Serial.println("EVENT: SFX_TEST");
+            sendAudioTestCommand();
+        }
     }
 }
 
@@ -713,8 +808,37 @@ if (audioOnline && now - lastAudioPong > 6000) {
 }
 }
 
+// Set local time over USB, e.g. T2026-10-27 13:45:00.
+// The clock must be set again after a full power cycle.
+void setClockFromSerial(const char *value) {
+    int yr, mo, day, hr, min, sec;
+    if (sscanf(value, "%d-%d-%d %d:%d:%d", &yr, &mo, &day, &hr, &min, &sec) != 6 ||
+        yr < 2024 || mo < 1 || mo > 12 || day < 1 || day > 31 ||
+        hr < 0 || hr > 23 || min < 0 || min > 59 || sec < 0 || sec > 59) {
+        Serial.println("CLOCK: INVALID FORMAT; USE TYYYY-MM-DD HH:MM:SS");
+        return;
+    }
+    struct tm t = {};
+    t.tm_year = yr - 1900;
+    t.tm_mon = mo - 1;
+    t.tm_mday = day;
+    t.tm_hour = hr;
+    t.tm_min = min;
+    t.tm_sec = sec;
+    t.tm_isdst = -1;
+    time_t epoch = mktime(&t);
+    struct timeval tv = {epoch, 0};
+    settimeofday(&tv, nullptr);
+    clockSet = true;
+    Serial.println("CLOCK: SET (CENTRAL TIME)");
+    if (currentPage == PAGE_HOME) drawHomeClock();
+}
+
 void setup() {
     Serial.begin(115200);
+    // Central time including US daylight-saving rules. No Wi-Fi network needed.
+    setenv("TZ", "CST6CDT,M3.2.0/2,M11.1.0/2", 1);
+    tzset();
     analogReadResolution(10);
     delay(800);
 
@@ -738,11 +862,36 @@ void setup() {
 
 void loop() {
     updateHelmetRadio();
+    if (currentPage == PAGE_HOME && millis() - lastHomeClockDraw >= 1000) {
+        lastHomeClockDraw = millis();
+        drawHomeClock();
+    }
 
-    // Serial Monitor: S=status, 1/0=fan, 2/3=TRACKING on/off.
-    if (Serial.available() > 0) {
+    // Serial Monitor: S=status, 1/0=fan, 2/3=tracking, T...=clock.
+    static char timeCommand[32];
+    static uint8_t timeIndex = 0;
+    static bool collectingTime = false;
+    while (Serial.available() > 0) {
         char key = Serial.read();
-        if (key == 's' || key == 'S') {
+        if (collectingTime) {
+            if (key == '\n' || key == '\r') {
+                timeCommand[timeIndex] = '\0';
+                setClockFromSerial(timeCommand);
+                timeIndex = 0;
+                collectingTime = false;
+            } else if (timeIndex < sizeof(timeCommand) - 1) {
+                timeCommand[timeIndex++] = key;
+            } else {
+                timeIndex = 0;
+                collectingTime = false;
+                Serial.println("CLOCK: COMMAND TOO LONG");
+            }
+            continue;
+        }
+        if (key == 'T') {
+            collectingTime = true;
+            timeIndex = 0;
+        } else if (key == 's' || key == 'S') {
             Serial.println("=== NCR RADIO STATUS ===");
             Serial.printf("ESP-NOW: %s\n", radioReady ? "ONLINE" : "OFFLINE");
             uint8_t channel = 0;
