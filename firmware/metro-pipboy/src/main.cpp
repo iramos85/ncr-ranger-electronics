@@ -58,6 +58,20 @@ constexpr int CAL_Y_BOTTOM = 290;
 // The bottom status strip is display-only.
 enum ScreenPage : uint8_t { PAGE_HOME, PAGE_HELMET, PAGE_CANNON, PAGE_AUDIO };
 ScreenPage currentPage = PAGE_HOME;
+enum AudioPage : uint8_t {
+    AUDIO_SFX,
+    AUDIO_RADIO
+};
+
+AudioPage currentAudioPage = AUDIO_SFX;
+
+// Display state is updated only by verified audio-node replies.
+uint8_t radioVolume = 50;
+bool radioVolumeKnown = false;
+bool radioPlaying = false;
+bool radioStateKnown = false;
+uint8_t radioTrack = 1;
+bool radioTrackKnown = false;
 const int TAB_Y = 82, TAB_H = 36, TAB_W = 110;
 const int TAB_X[4] = {8, 126, 244, 362};
 const int ACTION_X = 20, ACTION_Y = 143, ACTION_W = 440, ACTION_H = 60;
@@ -273,13 +287,25 @@ void drawScreen() {
         gfx->setTextColor(NCR_GRAY);
         gfx->setCursor(20, 223);
         gfx->print("LIGHT CONTROL: LOCAL STATE ONLY");
-    } else if (currentPage == PAGE_AUDIO) {
-        drawButton(SFX_X, SFX_Y, SFX_W, SFX_H, "PLAY TEST SFX", NCR_GREEN);
-        gfx->setTextSize(1);
-        gfx->setTextColor(NCR_GRAY);
-        gfx->setCursor(20, 223);
-        gfx->print(audioOnline ? "AUDIO NODE LINKED" : "AUDIO NODE NOT LINKED");
+} else if (currentPage == PAGE_AUDIO) {
+        drawButton(20, 130, 209, 38, "SFX",
+                   currentAudioPage == AUDIO_SFX ? NCR_AMBER : NCR_GREEN);
+        drawButton(251, 130, 209, 38, "RADIO",
+                   currentAudioPage == AUDIO_RADIO ? NCR_AMBER : NCR_GREEN);
+
+        if (currentAudioPage == AUDIO_SFX) {
+            drawButton(20, 185, 440, 52, "PLAY TEST SFX", NCR_GREEN);
+        } else {
+            gfx->setTextSize(2);
+            gfx->setTextColor(NCR_GREEN);
+            gfx->setCursor(75, 190);
+            gfx->print("RADIO NEW VEGAS");
+            gfx->setTextSize(1);
+            gfx->setCursor(105, 225);
+            gfx->print("CONTROLS COMING ONLINE");
+        }
     }
+
     gfx->drawFastHLine(12, 262, 456, NCR_DARK_GREEN);
     drawNodeStatus(20, "HELMET", helmetOnline);
     drawNodeStatus(180, "CANNON", cannonOnline);
@@ -368,7 +394,14 @@ void handleTouch(int x, int y) {
             drawScreen();
         }
     } else if (currentPage == PAGE_AUDIO) {
-        if (insideButton(x, y, SFX_X, SFX_Y, SFX_W, SFX_H)) {
+        if (insideButton(x, y, 20, 130, 209, 38)) {
+            currentAudioPage = AUDIO_SFX;
+            drawScreen();
+        } else if (insideButton(x, y, 251, 130, 209, 38)) {
+            currentAudioPage = AUDIO_RADIO;
+            drawScreen();
+        } else if (currentAudioPage == AUDIO_SFX &&
+                   insideButton(x, y, 20, 185, 440, 52)) {
             Serial.println("EVENT: SFX_TEST");
             sendAudioTestCommand();
         }

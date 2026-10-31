@@ -13,6 +13,10 @@
 
 constexpr uint8_t ESPNOW_CHANNEL = 6;
 constexpr uint32_t UART_BAUD = 115200;
+// Teensy response buffer
+constexpr size_t TEENSY_REPLY_SIZE = 64;
+char teensyReply[TEENSY_REPLY_SIZE] = {};
+size_t teensyReplyLength = 0;
 constexpr int ESP32_RX2 = 16; // From Teensy TX1, pin 1
 constexpr int ESP32_TX2 = 17; // To Teensy RX1, pin 0
 
@@ -26,6 +30,15 @@ portMUX_TYPE receiveMux = portMUX_INITIALIZER_UNLOCKED;
 
 volatile bool pingPending = false;
 volatile bool sfxPending = false;
+
+// Radio New Vegas wireless command mailbox
+// The ESP-NOW callback only copies commands.
+// The main loop forwards them to the Teensy.
+
+constexpr size_t AUDIO_COMMAND_SIZE = 32;
+
+char musicCommandPending[AUDIO_COMMAND_SIZE] = {};
+bool musicCommandReady = false;
 
 void onReceive(const esp_now_recv_info_t *info,
                const uint8_t *data, int len) {
@@ -46,6 +59,36 @@ void onReceive(const esp_now_recv_info_t *info,
     sfxPending = true;
     portEXIT_CRITICAL(&receiveMux);
   }
+  else if (
+    len > 1 &&
+    len <= (int)AUDIO_COMMAND_SIZE &&
+    data[len - 1] == '\0' &&
+    strncmp((const char*)data, "MUSIC:", 6) == 0
+) {
+    const char* command = (const char*)data;
+
+    const bool supported =
+        !strcmp(command, "MUSIC:PLAY") ||
+        !strcmp(command, "MUSIC:PAUSE") ||
+        !strcmp(command, "MUSIC:NEXT") ||
+        !strcmp(command, "MUSIC:PREV") ||
+        !strcmp(command, "MUSIC:STOP") ||
+        !strcmp(command, "MUSIC:STATUS") ||
+        !strcmp(command, "MUSIC:VOLUP") ||
+        !strcmp(command, "MUSIC:VOLDOWN") ||
+        !strcmp(command, "MUSIC:VOLUME");
+
+    if (supported) {
+        portENTER_CRITICAL(&receiveMux);
+
+        if (!musicCommandReady) {
+            memcpy(musicCommandPending, data, len);
+            musicCommandReady = true;
+        }
+
+        portEXIT_CRITICAL(&receiveMux);
+    }
+}
 }
 
 void setup() {
@@ -148,6 +191,9 @@ void loop() {
   bool replyToPing;
   bool playSfx;
 
+  char pendingMusicCommand[AUDIO_COMMAND_SIZE] = {};
+  bool forwardMusic = false;
+
   portENTER_CRITICAL(&receiveMux);
 
   replyToPing = pingPending;
@@ -155,6 +201,18 @@ void loop() {
 
   playSfx = sfxPending;
   sfxPending = false;
+
+  forwardMusic = musicCommandReady;
+
+  if (forwardMusic) {
+  memcpy(
+    pendingMusicCommand,
+    musicCommandPending,
+    AUDIO_COMMAND_SIZE
+  );
+
+  musicCommandReady = false;
+  }
 
   portEXIT_CRITICAL(&receiveMux);
 
@@ -183,10 +241,49 @@ void loop() {
     );
   }
 
-  // Read Teensy diagnostic replies
-  while (Serial2.available()) {
-    Serial.write(Serial2.read());
+  if (forwardMusic) {
+  Serial2.println(pendingMusicCommand);
+
+  Serial.print("METRO MUSIC -> TEENSY UART: ");
+  Serial.println(pendingMusicCommand);
   }
+
+ // Read Teensy diagnostic replies and forward music
+// status messages to the Pip-Boy over ESP-NOW.
+while (Serial2.available()) {
+  char c = static_cast<char>(Serial2.read());
+
+  if (c == '\n') {
+    teensyReply[teensyReplyLength] = '\0';
+
+    if (teensyReplyLength > 0) {
+      Serial.println(teensyReply);
+
+      if (strncmp(teensyReply, "MUSIC:", 6) == 0) {
+        esp_err_t result = esp_now_send(
+          BROADCAST_MAC,
+          reinterpret_cast<const uint8_t*>(teensyReply),
+          teensyReplyLength + 1
+        );
+
+        Serial.printf(
+          "TEENSY -> METRO: %s (%s)\n",
+          teensyReply,
+          result == ESP_OK ? "QUEUED" : "FAILED"
+        );
+      }
+    }
+
+    teensyReplyLength = 0;
+
+  } else if (c != '\r') {
+    if (teensyReplyLength < TEENSY_REPLY_SIZE - 1) {
+      teensyReply[teensyReplyLength++] = c;
+    } else {
+      teensyReplyLength = 0;
+    }
+  }
+}
 
   delay(5);
 }
