@@ -28,6 +28,8 @@ AudioEffectGranular    pitchShift;
 AudioEffectDelay       pitchDelay;
 AudioPlaySdWav         sfxPlayer;
 AudioPlaySdWav         musicPlayer;
+AudioPlaySdWav         ambientPlayer;
+AudioMixer4            voiceAmbientMixer;
 AudioMixer4            outputMixer;
 AudioMixer4            finalMixer;
 
@@ -57,8 +59,10 @@ AudioConnection patch7(pitchShift, 0, finalMixer, 2);
 AudioConnection patch8(pitchShift, 0, pitchDelay, 0);
 AudioConnection patch9(pitchDelay, 0, finalMixer, 3);
 
-// Voice and SFX output
-AudioConnection patch10(finalMixer, 0, outputMixer, 0);
+// Voice, ambient, SFX and Radio New Vegas output
+AudioConnection patchVoiceAmbient(finalMixer, 0, voiceAmbientMixer, 0);
+AudioConnection patchAmbient(ambientPlayer, 0, voiceAmbientMixer, 1);
+AudioConnection patch10(voiceAmbientMixer, 0, outputMixer, 0);
 AudioConnection patch11(sfxPlayer, 0, outputMixer, 1);
 AudioConnection patch12(sfxPlayer, 1, outputMixer, 2);
 
@@ -72,8 +76,6 @@ AudioConnection patch14(outputMixer, 0, audioOutput, 1);
 // ======================================================
 
 constexpr uint32_t UART_BAUD = 115200;
-
-const char SFX_FILENAME[] = "READY.WAV";
 
 const float voiceGains[4] = {
   0.20f,  // Natural voice
@@ -224,43 +226,77 @@ void reportSfxStatus(const char *message) {
 // SFX PLAYBACK
 // ======================================================
 
-void playTestSfx() {
+// Short effects replace each other; music and ambient remain independent.
+// Files use 8.3 SD-compatible names, 44.1kHz/16-bit mono PCM.
+bool ambientRequested = false;
+uint32_t ambientStartedAt = 0;
 
-  // Check SD initialization
-  if (!sdReady) {
-    reportSfxStatus("SD_NOT_READY");
+void reportFx(const char *prefix, const char *detail) {
+  char msg[64];
+  snprintf(msg, sizeof(msg), "%s:%s", prefix, detail);
+  reportSfxStatus(msg);
+}
+
+void playNamedFx(const char *filename) {
+  if (!sdReady) { reportFx("FX", "SD_NOT_READY"); return; }
+  if (!SD.exists(filename)) { reportFx("FX", "FILE_MISSING"); return; }
+  sfxPlayer.stop();
+  if (!sfxPlayer.play(filename)) { reportFx("FX", "PLAY_FAILED"); return; }
+  reportFx("FX", filename);
+}
+
+void setAmbient(bool enabled) {
+  if (!enabled) {
+    ambientRequested = false;
+    ambientPlayer.stop();
+    reportFx("AMBIENT", "OFF");
     return;
   }
-
-  // Check that TEST.WAV exists
-  if (!SD.exists(SFX_FILENAME)) {
-    reportSfxStatus("SFX_FILE_MISSING");
+  if (!sdReady || !SD.exists("AMBIENT.WAV")) {
+    reportFx("AMBIENT", "FILE_MISSING");
     return;
   }
+  if (ambientRequested) { reportFx("AMBIENT", "ON"); return; }
+  ambientRequested = true;
+  ambientStartedAt = millis();
+  if (!ambientPlayer.play("AMBIENT.WAV")) {
+    ambientRequested = false;
+    reportFx("AMBIENT", "PLAY_FAILED");
+  } else reportFx("AMBIENT", "ON");
+}
 
-  reportSfxStatus("SFX_FILE_FOUND");
+void updateAmbient() {
+  if (ambientRequested && !ambientPlayer.isPlaying() &&
+      millis() - ambientStartedAt >= 250) {
+    ambientStartedAt = millis();
+    if (!ambientPlayer.play("AMBIENT.WAV")) {
+      ambientRequested = false;
+      reportFx("AMBIENT", "PLAY_FAILED");
+    }
+  }
+}
 
-  // Stop previous playback if button pressed again
-  if (sfxPlayer.isPlaying()) {
+void handleFxCommand(const char *command) {
+  if (!strcmp(command, "SFX_TEST") || !strcmp(command, "FX:READY"))
+    playNamedFx("READY.WAV");
+  else if (!strcmp(command, "FX:BOOT")) playNamedFx("BOOT.WAV");
+  else if (!strcmp(command, "FX:TRACKON")) playNamedFx("TRACKON.WAV");
+  else if (!strcmp(command, "FX:TRACKOFF")) playNamedFx("TRACKOFF.WAV");
+  else if (!strcmp(command, "FX:CHARGE")) playNamedFx("CHARGE.WAV");
+  else if (!strcmp(command, "FX:PLASMA")) playNamedFx("PLASMA.WAV");
+  else if (!strcmp(command, "FX:COOL")) playNamedFx("COOL.WAV");
+  else if (!strcmp(command, "FX:WARN")) playNamedFx("WARN.WAV");
+  else if (!strcmp(command, "FX:RADIO")) playNamedFx("RADIO.WAV");
+  else if (!strcmp(command, "FX:SELECT")) playNamedFx("SELECT.WAV");
+  else if (!strcmp(command, "FX:STOP")) {
     sfxPlayer.stop();
+    reportFx("FX", "STOPPED");
   }
-
-  // Attempt playback
-  if (!sfxPlayer.play(SFX_FILENAME)) {
-    reportSfxStatus("SFX_PLAY_FAILED");
-    return;
-  }
-
-  reportSfxStatus("SFX_PLAYING");
-
-  // Give WAV decoder time to process the file
-  delay(100);
-
-  if (sfxPlayer.isPlaying()) {
-    reportSfxStatus("SFX_DECODING");
-  } else {
-    reportSfxStatus("SFX_STOPPED_EARLY");
-  }
+  else if (!strcmp(command, "AMBIENT:ON")) setAmbient(true);
+  else if (!strcmp(command, "AMBIENT:OFF")) setAmbient(false);
+  else if (!strcmp(command, "AMBIENT:TOGGLE")) setAmbient(!ambientRequested);
+  else if (!strcmp(command, "AMBIENT:STATUS")) reportFx("AMBIENT", ambientRequested ? "ON" : "OFF");
+  else reportFx("FX", "UNKNOWN_COMMAND");
 }
 
 // ======================================================
@@ -290,10 +326,10 @@ void handleCommand(const char* command) {
   } else if (strncmp(command, "MUSIC:", 6) == 0) {
     handleMusicCommand(command);
 
-  } else if (strcmp(command, "SFX_TEST") == 0) {
-
-    // Same diagnostic for wireless and USB requests
-    playTestSfx();
+  } else if (strcmp(command, "SFX_TEST") == 0 ||
+             strncmp(command, "FX:", 3) == 0 ||
+             strncmp(command, "AMBIENT:", 8) == 0) {
+    handleFxCommand(command);
 
   } else {
     Serial1.println("UNKNOWN_COMMAND");
@@ -311,7 +347,7 @@ void setup() {
 
   delay(1000);
 
-  AudioMemory(120);
+  AudioMemory(160);
 
   // --------------------------------------------------
   // SD CARD
@@ -328,7 +364,11 @@ void setup() {
   // OUTPUT MIXER
   // --------------------------------------------------
 
-  outputMixer.gain(0, 0.85f); // Voice; // Voice
+  voiceAmbientMixer.gain(0, 1.0f); // Preserve existing voice path
+  voiceAmbientMixer.gain(1, 0.35f);
+  voiceAmbientMixer.gain(2, 0.0f);
+  voiceAmbientMixer.gain(3, 0.0f);
+  outputMixer.gain(0, 0.85f); // Voice + ambient
   outputMixer.gain(1, 0.45f); // SFX left
   outputMixer.gain(2, 0.45f); // SFX right
   applyMusicVolume(); //Radio New Vegas
@@ -413,6 +453,7 @@ void setup() {
 void loop() {
 
   updateMusic();
+  updateAmbient();
 
   // --------------------------------------------------
   // ESP32 UART COMMANDS
@@ -451,9 +492,9 @@ void loop() {
     String command = Serial.readStringUntil('\n');
     command.trim();
 
-    if (command == "SFX_TEST") {
-      Serial.println("USB: SFX_TEST");
-      playTestSfx();
+    if (command == "SFX_TEST" || command.startsWith("FX:") ||
+        command.startsWith("AMBIENT:")) {
+      handleFxCommand(command.c_str());
     } else if (command.startsWith("MUSIC:")) {
       handleMusicCommand(command.c_str());
     }
