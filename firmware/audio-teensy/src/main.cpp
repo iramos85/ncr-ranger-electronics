@@ -27,6 +27,7 @@ AudioEffectBitcrusher  bitcrusher;
 AudioEffectGranular    pitchShift;
 AudioEffectDelay       pitchDelay;
 AudioPlaySdWav         sfxPlayer;
+AudioPlaySdWav         musicPlayer;
 AudioMixer4            outputMixer;
 AudioMixer4            finalMixer;
 
@@ -61,6 +62,8 @@ AudioConnection patch10(finalMixer, 0, outputMixer, 0);
 AudioConnection patch11(sfxPlayer, 0, outputMixer, 1);
 AudioConnection patch12(sfxPlayer, 1, outputMixer, 2);
 
+AudioConnection patchMusic(musicPlayer, 0, outputMixer, 3);
+
 AudioConnection patch13(outputMixer, 0, audioOutput, 0);
 AudioConnection patch14(outputMixer, 0, audioOutput, 1);
 
@@ -85,6 +88,82 @@ size_t commandLength = 0;
 
 bool codecReady = false;
 bool sdReady = false;
+
+// Radio New Vegas: all playlist files are 44.1kHz / 16-bit / mono.
+constexpr uint8_t MUSIC_TRACK_COUNT = 43;
+uint8_t musicTrack = 0;  // Zero-based; NV001.WAV is track 0.
+bool musicRequested = false;
+uint32_t musicStartedAt = 0;
+
+void reportMusicState(const char *state) {
+  char message[64];
+  snprintf(message, sizeof(message), "MUSIC:%s:%u/%u", state,
+           unsigned(musicTrack + 1), unsigned(MUSIC_TRACK_COUNT));
+  Serial.println(message);
+  Serial1.println(message);
+}
+
+bool startMusicTrack() {
+  if (!sdReady) {
+    reportMusicState("SD_NOT_READY");
+    musicRequested = false;
+    return false;
+  }
+  char filename[13];
+  snprintf(filename, sizeof(filename), "NV%03u.WAV", unsigned(musicTrack + 1));
+  if (!SD.exists(filename)) {
+    reportMusicState("MISSING");
+    musicRequested = false;
+    return false;
+  }
+  musicPlayer.stop();
+  if (!musicPlayer.play(filename)) {
+    reportMusicState("FAILED");
+    musicRequested = false;
+    return false;
+  }
+  musicRequested = true;
+  musicStartedAt = millis();
+  reportMusicState("PLAYING");
+  return true;
+}
+
+void handleMusicCommand(const char *command) {
+  if (!strcmp(command, "MUSIC:PLAY")) {
+    if (musicPlayer.isPaused()) {
+      musicPlayer.togglePlayPause();
+      musicRequested = true;
+      reportMusicState("PLAYING");
+    } else if (!musicRequested || !musicPlayer.isPlaying()) {
+      startMusicTrack();
+    } else reportMusicState("PLAYING");
+  } else if (!strcmp(command, "MUSIC:PAUSE")) {
+    if (musicRequested && musicPlayer.isPlaying() && !musicPlayer.isPaused()) {
+      musicPlayer.togglePlayPause();
+      reportMusicState("PAUSED");
+    } else reportMusicState("NOT_PLAYING");
+  } else if (!strcmp(command, "MUSIC:NEXT") || !strcmp(command, "MUSIC:PREV")) {
+    musicTrack = uint8_t((musicTrack + MUSIC_TRACK_COUNT +
+        (!strcmp(command, "MUSIC:NEXT") ? 1 : -1)) % MUSIC_TRACK_COUNT);
+    startMusicTrack();
+  } else if (!strcmp(command, "MUSIC:STOP")) {
+    musicPlayer.stop();
+    musicRequested = false;
+    reportMusicState("STOPPED");
+  } else if (!strcmp(command, "MUSIC:STATUS")) {
+    reportMusicState(musicPlayer.isPaused() ? "PAUSED" :
+      (musicRequested && musicPlayer.isPlaying()) ? "PLAYING" : "STOPPED");
+  }
+}
+
+void updateMusic() {
+  // Avoid advancing in the instant immediately after issuing play().
+  if (musicRequested && !musicPlayer.isPaused() &&
+      !musicPlayer.isPlaying() && millis() - musicStartedAt >= 250) {
+    musicTrack = uint8_t((musicTrack + 1) % MUSIC_TRACK_COUNT);
+    startMusicTrack();
+  }
+}
 
 // ======================================================
 // VOICE CONTROL
@@ -176,6 +255,9 @@ void handleCommand(const char* command) {
     setVoiceEnabled(false);
     Serial1.println("VOICE_OFF_OK");
 
+  } else if (strncmp(command, "MUSIC:", 6) == 0) {
+    handleMusicCommand(command);
+
   } else if (strcmp(command, "SFX_TEST") == 0) {
 
     // Same diagnostic for wireless and USB requests
@@ -217,7 +299,7 @@ void setup() {
   outputMixer.gain(0, 0.85f); // Voice; // Voice
   outputMixer.gain(1, 0.45f); // SFX left
   outputMixer.gain(2, 0.45f); // SFX right
-  outputMixer.gain(3, 0.0f);
+  outputMixer.gain(3, 0.08f); // Background radio, independent of voice/SFX
 
   // --------------------------------------------------
   // AUDIO CODEC
@@ -298,6 +380,8 @@ void setup() {
 
 void loop() {
 
+  updateMusic();
+
   // --------------------------------------------------
   // ESP32 UART COMMANDS
   // --------------------------------------------------
@@ -336,11 +420,10 @@ void loop() {
     command.trim();
 
     if (command == "SFX_TEST") {
-
       Serial.println("USB: SFX_TEST");
-
-      // Call the exact same handler as the ESP32
       playTestSfx();
+    } else if (command.startsWith("MUSIC:")) {
+      handleMusicCommand(command.c_str());
     }
   }
 }
