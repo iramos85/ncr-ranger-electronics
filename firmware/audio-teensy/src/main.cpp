@@ -94,6 +94,17 @@ constexpr uint8_t MUSIC_TRACK_COUNT = 43;
 uint8_t musicTrack = 0;  // Zero-based; NV001.WAV is track 0.
 bool musicRequested = false;
 uint32_t musicStartedAt = 0;
+constexpr float MUSIC_MAX_GAIN = 0.16f;
+constexpr uint8_t MUSIC_VOLUME_STEP = 5;
+
+uint8_t musicVolume = 50;
+
+void applyMusicVolume() {
+  outputMixer.gain(
+    3,
+    MUSIC_MAX_GAIN * (musicVolume / 100.0f)
+  );
+}
 
 void reportMusicState(const char *state) {
   char message[64];
@@ -129,6 +140,27 @@ bool startMusicTrack() {
 }
 
 void handleMusicCommand(const char *command) {
+  if (!strcmp(command, "MUSIC:VOLUP")) {
+  musicVolume = min(100, (int)musicVolume + MUSIC_VOLUME_STEP);
+  applyMusicVolume();
+  Serial.printf("MUSIC:VOLUME:%u\n", musicVolume);
+  Serial1.printf("MUSIC:VOLUME:%u\n", musicVolume);
+  return;
+}
+
+if (!strcmp(command, "MUSIC:VOLDOWN")) {
+  musicVolume = max(0, (int)musicVolume - MUSIC_VOLUME_STEP);
+  applyMusicVolume();
+  Serial.printf("MUSIC:VOLUME:%u\n", musicVolume);
+  Serial1.printf("MUSIC:VOLUME:%u\n", musicVolume);
+  return;
+}
+
+if (!strcmp(command, "MUSIC:VOLUME")) {
+  Serial.printf("MUSIC:VOLUME:%u\n", musicVolume);
+  Serial1.printf("MUSIC:VOLUME:%u\n", musicVolume);
+  return;
+}
   if (!strcmp(command, "MUSIC:PLAY")) {
     if (musicPlayer.isPaused()) {
       musicPlayer.togglePlayPause();
@@ -299,7 +331,7 @@ void setup() {
   outputMixer.gain(0, 0.85f); // Voice; // Voice
   outputMixer.gain(1, 0.45f); // SFX left
   outputMixer.gain(2, 0.45f); // SFX right
-  outputMixer.gain(3, 0.08f); // Background radio, independent of voice/SFX
+  applyMusicVolume(); //Radio New Vegas
 
   // --------------------------------------------------
   // AUDIO CODEC
