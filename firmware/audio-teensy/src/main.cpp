@@ -73,8 +73,12 @@ constexpr uint32_t UART_BAUD = 115200;
 const char SFX_FILENAME[] = "TEST.WAV";
 
 const float voiceGains[4] = {
-  0.45, 0.15, 0.30, 0.08
+  0.20f,  // Natural voice
+  0.16f,  // Digital grit
+  0.50f,  // Lower-pitched voice
+  0.08f   // Delayed low voice
 };
+
 
 char commandBuffer[64];
 size_t commandLength = 0;
@@ -210,7 +214,7 @@ void setup() {
   // OUTPUT MIXER
   // --------------------------------------------------
 
-  outputMixer.gain(0, 0.75f); // Voice
+  outputMixer.gain(0, 0.85f); // Voice; // Voice
   outputMixer.gain(1, 0.45f); // SFX left
   outputMixer.gain(2, 0.45f); // SFX right
   outputMixer.gain(3, 0.0f);
@@ -271,10 +275,7 @@ void setup() {
   // VOICE MIX
   // --------------------------------------------------
 
-  finalMixer.gain(0, 0.45);
-  finalMixer.gain(1, 0.15);
-  finalMixer.gain(2, 0.30);
-  finalMixer.gain(3, 0.08);
+  setVoiceEnabled(true);
 
   // --------------------------------------------------
   // OUTPUT

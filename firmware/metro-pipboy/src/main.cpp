@@ -156,20 +156,32 @@ void drawFanButton() {
     }
 }
 
+// HOME V2: status console, sized for 480x320 landscape.
+// Keep touch hitboxes and the entire ESP-NOW implementation unchanged.
 void drawHomeClock() {
     if (currentPage != PAGE_HOME) return;
-    gfx->fillRect(12, 137, 456, 111, NCR_BLACK);
+
+    // Redraw only the dashboard content, not the navigation or node footer.
+    gfx->fillRect(12, 127, 456, 128, NCR_BLACK);
+    gfx->drawRect(12, 128, 456, 125, NCR_DARK_GREEN);
+    gfx->drawFastVLine(240, 134, 67, NCR_DARK_GREEN);
+    gfx->drawFastHLine(18, 205, 444, NCR_DARK_GREEN);
+
     gfx->setTextSize(1);
     gfx->setTextColor(NCR_GREEN);
     gfx->setCursor(20, 137);
-    gfx->print("LOCAL SYSTEM CLOCK");
+    gfx->print("LOCAL / CENTRAL TIME");
+    gfx->setCursor(252, 137);
+    gfx->print("MISSION UPTIME");
+
     if (clockSet) {
         time_t now = time(nullptr);
         struct tm localNow;
         localtime_r(&now, &localNow);
-        char dateBuf[32], timeBuf[32];
+        char dateBuf[26], timeBuf[20];
         strftime(dateBuf, sizeof(dateBuf), "%a %b %d, %Y", &localNow);
         strftime(timeBuf, sizeof(timeBuf), "%I:%M:%S %p", &localNow);
+        gfx->setTextColor(NCR_GREEN);
         gfx->setTextSize(2);
         gfx->setCursor(20, 156);
         gfx->print(timeBuf);
@@ -183,15 +195,39 @@ void drawHomeClock() {
         gfx->print("TIME NOT SET");
         gfx->setTextSize(1);
         gfx->setCursor(20, 184);
-        gfx->print("USB: TYYYY-MM-DD HH:MM:SS");
+        gfx->print("SET VIA USB SERIAL");
     }
-    unsigned long total = millis() / 1000;
-    char uptime[50];
-    snprintf(uptime, sizeof(uptime), "UPTIME %02luh %02lum %02lus",
-             total / 3600, (total / 60) % 60, total % 60);
+
+    unsigned long total = millis() / 1000UL;
+    char upBuf[20];
+    snprintf(upBuf, sizeof(upBuf), "%02lu:%02lu:%02lu",
+             total / 3600UL, (total / 60UL) % 60UL, total % 60UL);
+    gfx->setTextSize(2);
+    gfx->setTextColor(NCR_GREEN);
+    gfx->setCursor(252, 156);
+    gfx->print(upBuf);
+    gfx->setTextSize(1);
     gfx->setTextColor(NCR_GRAY);
-    gfx->setCursor(20, 217);
-    gfx->print(uptime);
+    gfx->setCursor(252, 184);
+    gfx->print("METRO ESP32-S3");
+
+    gfx->setTextColor(NCR_GREEN);
+    gfx->setCursor(20, 215);
+    gfx->print("RADIO BUS:");
+    gfx->setTextColor(radioReady ? NCR_GREEN : NCR_AMBER);
+    gfx->setCursor(92, 215);
+    gfx->print(radioReady ? "ONLINE" : "OFFLINE");
+    gfx->setTextColor(NCR_GRAY);
+    gfx->setCursor(252, 215);
+    gfx->print("ESP-NOW / CH 06");
+
+    char memBuf[32];
+    snprintf(memBuf, sizeof(memBuf), "FREE HEAP: %lu KB",
+             (unsigned long)(ESP.getFreeHeap() / 1024UL));
+    gfx->setCursor(20, 235);
+    gfx->print(memBuf);
+    gfx->setCursor(252, 235);
+    gfx->print("RANGER OS  V2.0");
 }
 
 void drawScreen() {
@@ -203,7 +239,7 @@ void drawScreen() {
     gfx->print("NCR RANGER // CONTROL");
     gfx->setTextSize(1);
     gfx->setCursor(12, 59);
-    gfx->print("SYSTEM BUS / ESP-NOW CH 6");
+    gfx->print("NCR FIELD SYSTEM / RANGER OS");
 
     const char *tabs[] = {"HOME", "HELMET", "CANNON", "AUDIO"};
     for (int i = 0; i < 4; i++) {
@@ -858,6 +894,7 @@ void setup() {
     initRadio();
     startHelmetProbe();
     Serial.println("SYSTEM: READY");
+    if (currentPage == PAGE_HOME) drawHomeClock();
 }
 
 void loop() {
