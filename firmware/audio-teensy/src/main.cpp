@@ -73,7 +73,7 @@ AudioConnection patch14(outputMixer, 0, audioOutput, 1);
 
 constexpr uint32_t UART_BAUD = 115200;
 
-const char SFX_FILENAME[] = "TEST.WAV";
+const char SFX_FILENAME[] = "READY.WAV";
 
 const float voiceGains[4] = {
   0.20f,  // Natural voice
