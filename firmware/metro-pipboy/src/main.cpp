@@ -72,6 +72,13 @@ bool radioPlaying = false;
 bool radioStateKnown = false;
 uint8_t radioTrack = 1;
 bool radioTrackKnown = false;
+uint8_t radioTrackCount = 43;
+bool radioPaused = false;
+bool ambientKnown = false;
+bool ambientEnabled = false;
+unsigned long ambientQueryAt = 0;
+void sendAudioFxCommand(const char *command);
+unsigned long radioVolumeQueryAt = 0;
 const int TAB_Y = 82, TAB_H = 36, TAB_W = 110;
 const int TAB_X[4] = {8, 126, 244, 362};
 const int ACTION_X = 20, ACTION_Y = 143, ACTION_W = 440, ACTION_H = 60;
@@ -111,6 +118,7 @@ const uint8_t MAX_LENS_ATTEMPTS = 3;
 // handleTouch() precedes radio implementation below.
 void sendHelmetFanCommand(bool turnOn);
 void sendAudioTestCommand();
+void sendAudioMusicCommand(const char *command);
 
 bool touchWasDown = false;
 uint8_t releaseSamples = 0;
@@ -294,15 +302,42 @@ void drawScreen() {
                    currentAudioPage == AUDIO_RADIO ? NCR_AMBER : NCR_GREEN);
 
         if (currentAudioPage == AUDIO_SFX) {
-            drawButton(20, 185, 440, 52, "PLAY TEST SFX", NCR_GREEN);
+            // Compact 2x3 tactical grid within the calibrated touch area.
+            drawButton(20, 173, 209, 25, "SYSTEM BOOT", NCR_GREEN);
+            drawButton(251, 173, 209, 25, "TRACKING", NCR_GREEN);
+            drawButton(20, 202, 209, 25, "PLASMA CHARGE", NCR_GREEN);
+            drawButton(251, 202, 209, 25, "PLASMA BLAST", NCR_GREEN);
+            drawButton(20, 231, 209, 25, "WARNING", NCR_GREEN);
+            drawButton(251, 231, 209, 25,
+                       !ambientKnown ? "AMBIENT ?" :
+                       (ambientEnabled ? "AMBIENT ON" : "AMBIENT OFF"),
+                       ambientEnabled ? NCR_AMBER : NCR_GREEN);
         } else {
-            gfx->setTextSize(2);
-            gfx->setTextColor(NCR_GREEN);
-            gfx->setCursor(75, 190);
-            gfx->print("RADIO NEW VEGAS");
             gfx->setTextSize(1);
-            gfx->setCursor(105, 225);
-            gfx->print("CONTROLS COMING ONLINE");
+            gfx->setTextColor(NCR_GREEN);
+            gfx->setCursor(20, 174);
+            gfx->print("RADIO NEW VEGAS");
+            gfx->setCursor(260, 174);
+            if (radioTrackKnown) {
+                gfx->printf("TRACK %02u/%02u", radioTrack, radioTrackCount);
+            } else {
+                gfx->print("TRACK --/43");
+            }
+            gfx->setCursor(20, 185);
+            gfx->print(radioStateKnown ?
+                       (radioPlaying ? "PLAYING" : (radioPaused ? "PAUSED" : "STOPPED")) :
+                       "STATE UNKNOWN");
+            drawButton(20, 197, 130, 30, "PREV", NCR_GREEN);
+            drawButton(175, 197, 130, 30,
+                       radioPlaying ? "PAUSE" : "PLAY", NCR_GREEN);
+            drawButton(330, 197, 130, 30, "NEXT", NCR_GREEN);
+            drawButton(20, 230, 115, 26, "VOL-", NCR_GREEN);
+            drawButton(345, 230, 115, 26, "VOL+", NCR_GREEN);
+            gfx->setTextSize(1);
+            gfx->setTextColor(NCR_AMBER);
+            gfx->setCursor(181, 239);
+            if (radioVolumeKnown) gfx->printf("VOL %u%%", radioVolume);
+            else gfx->print("VOL --");
         }
     }
 
@@ -365,6 +400,8 @@ void setTrackingMode(bool enabled) {
     lensCommandAttempts = 0;
     Serial.println(trackingActive ?
                    "EVENT: TRACKING_START" : "EVENT: TRACKING_STOP");
+    // Queue the short acknowledgment sound; helmet link remains independent.
+    if (audioOnline) sendAudioFxCommand(enabled ? "FX:TRACKON" : "FX:TRACKOFF");
     drawScreen();
 }
 
@@ -397,13 +434,40 @@ void handleTouch(int x, int y) {
         if (insideButton(x, y, 20, 130, 209, 38)) {
             currentAudioPage = AUDIO_SFX;
             drawScreen();
+            ambientQueryAt = millis() + 50;
         } else if (insideButton(x, y, 251, 130, 209, 38)) {
             currentAudioPage = AUDIO_RADIO;
             drawScreen();
-        } else if (currentAudioPage == AUDIO_SFX &&
-                   insideButton(x, y, 20, 185, 440, 52)) {
-            Serial.println("EVENT: SFX_TEST");
-            sendAudioTestCommand();
+            sendAudioMusicCommand("MUSIC:STATUS");
+            // ESP32 has a one-command mailbox; send the query later.
+            radioVolumeQueryAt = millis() + 350;
+        } else if (currentAudioPage == AUDIO_SFX) {
+            if (insideButton(x, y, 20, 173, 209, 25))
+                sendAudioFxCommand("FX:BOOT");
+            else if (insideButton(x, y, 251, 173, 209, 25))
+                sendAudioFxCommand(trackingActive ? "FX:TRACKON" : "FX:TRACKOFF");
+            else if (insideButton(x, y, 20, 202, 209, 25))
+                sendAudioFxCommand("FX:CHARGE");
+            else if (insideButton(x, y, 251, 202, 209, 25))
+                sendAudioFxCommand("FX:PLASMA");
+            else if (insideButton(x, y, 20, 231, 209, 25))
+                sendAudioFxCommand("FX:WARN");
+            else if (insideButton(x, y, 251, 231, 209, 25)) {
+                // Query first when state is unknown; never guess the state.
+                if (!ambientKnown) sendAudioFxCommand("AMBIENT:STATUS");
+                else sendAudioFxCommand(ambientEnabled ? "AMBIENT:OFF" : "AMBIENT:ON");
+            }
+        } else if (currentAudioPage == AUDIO_RADIO) {
+            if (insideButton(x, y, 20, 197, 130, 30))
+                sendAudioMusicCommand("MUSIC:PREV");
+            else if (insideButton(x, y, 175, 197, 130, 30))
+                sendAudioMusicCommand(radioPlaying ? "MUSIC:PAUSE" : "MUSIC:PLAY");
+            else if (insideButton(x, y, 330, 197, 130, 30))
+                sendAudioMusicCommand("MUSIC:NEXT");
+            else if (insideButton(x, y, 20, 230, 115, 26))
+                sendAudioMusicCommand("MUSIC:VOLDOWN");
+            else if (insideButton(x, y, 345, 230, 115, 26))
+                sendAudioMusicCommand("MUSIC:VOLUP");
         }
     }
 }
@@ -472,6 +536,10 @@ uint8_t rxPongMac[6] = {0};
 // Audio node response mailbox
 bool rxAudioPongPending = false;
 uint8_t rxAudioPongMac[6] = {0};
+char rxMusicStatus[64] = {};
+bool rxMusicStatusReady = false;
+char rxAmbientStatus[64] = {};
+bool rxAmbientStatusReady = false;
 uint8_t rxFanReply = 0;
 uint8_t rxFanMac[6] = {0};
 // Fan reply: 1=FAN_ON_OK, 2=FAN_OFF_OK, 3=FAN_ON, 4=FAN_OFF
@@ -503,6 +571,27 @@ if (len == (int)sizeof("AUDIO_PONG") &&
 
     return;
 }                   
+    // Only the known audio node may update radio state.
+    if (memcmp(info->src_addr, AUDIO_MAC, 6) == 0 &&
+        len > 7 && len <= (int)sizeof(rxMusicStatus) &&
+        data[len - 1] == '\0' &&
+        memcmp(data, "MUSIC:", 6) == 0) {
+        portENTER_CRITICAL(&helmetRxMux);
+        memcpy(rxMusicStatus, data, len);
+        rxMusicStatusReady = true;
+        portEXIT_CRITICAL(&helmetRxMux);
+        return;
+    }
+    if (memcmp(info->src_addr, AUDIO_MAC, 6) == 0 &&
+        len > 8 && len <= (int)sizeof(rxAmbientStatus) &&
+        data[len - 1] == '\0' &&
+        memcmp(data, "AMBIENT:", 8) == 0) {
+        portENTER_CRITICAL(&helmetRxMux);
+        memcpy(rxAmbientStatus, data, len);
+        rxAmbientStatusReady = true;
+        portEXIT_CRITICAL(&helmetRxMux);
+        return;
+    }
     if (len >= (int)sizeof("PONG") &&
         memcmp(data, "PONG", sizeof("PONG")) == 0) {
         portENTER_CRITICAL(&helmetRxMux);
@@ -644,6 +733,35 @@ void sendAudioTestCommand() {
 }
 
 
+void sendAudioMusicCommand(const char *command) {
+    if (!radioReady || !audioOnline) {
+        Serial.println("MUSIC: AUDIO NODE OFFLINE");
+        return;
+    }
+    if (!esp_now_is_peer_exist(AUDIO_MAC)) {
+        esp_now_peer_info_t peer = {};
+        memcpy(peer.peer_addr, AUDIO_MAC, 6);
+        peer.channel = ESPNOW_CHANNEL;
+        peer.ifidx = WIFI_IF_STA;
+        peer.encrypt = false;
+        esp_err_t rc = esp_now_add_peer(&peer);
+        if (rc != ESP_OK && rc != ESP_ERR_ESPNOW_EXIST) {
+            Serial.printf("MUSIC PEER ERROR: %d\n", (int)rc);
+            return;
+        }
+    }
+    const size_t len = strlen(command) + 1;
+    const esp_err_t rc = esp_now_send(
+        AUDIO_MAC, reinterpret_cast<const uint8_t*>(command), len);
+    Serial.printf("METRO -> AUDIO: %s (%s)\n", command,
+                  rc == ESP_OK ? "QUEUED" : "FAILED");
+}
+
+void sendAudioFxCommand(const char *command) {
+    // Reuse existing audio ESP-NOW peer setup and sender logic.
+    sendAudioMusicCommand(command);
+}
+
 void queryHelmetFanStatus() {
     if (!helmetOnline || !helmetPeerReady) return;
     const char command[] = "STATUS";
@@ -718,6 +836,10 @@ void updateHelmetRadio() {
     uint8_t pongMac[6];
     bool gotAudioPong;
     uint8_t audioPongMac[6];
+    bool gotMusicStatus;
+    char musicStatus[64] = {};
+    bool gotAmbientStatus;
+    char ambientStatus[64] = {};
     uint8_t fanReply;
     uint8_t replyMac[6];
     uint8_t lensReply;
@@ -729,6 +851,12 @@ void updateHelmetRadio() {
     gotAudioPong = rxAudioPongPending;
     memcpy(audioPongMac, rxAudioPongMac, 6);
     rxAudioPongPending = false;
+    gotMusicStatus = rxMusicStatusReady;
+    if (gotMusicStatus) memcpy(musicStatus, rxMusicStatus, sizeof(musicStatus));
+    rxMusicStatusReady = false;
+    gotAmbientStatus = rxAmbientStatusReady;
+    if (gotAmbientStatus) memcpy(ambientStatus, rxAmbientStatus, sizeof(ambientStatus));
+    rxAmbientStatusReady = false;
     fanReply = rxFanReply;
     memcpy(replyMac, rxFanMac, 6);
     rxFanReply = 0;
@@ -752,6 +880,50 @@ if (gotAudioPong &&
         drawNodeStatus(350, "AUDIO", true);
     }
 }
+
+    if (gotAmbientStatus) {
+        Serial.printf("AUDIO <- %s\n", ambientStatus);
+        if (!strcmp(ambientStatus, "AMBIENT:ON")) {
+            ambientEnabled = true;
+            ambientKnown = true;
+        } else if (!strcmp(ambientStatus, "AMBIENT:OFF")) {
+            ambientEnabled = false;
+            ambientKnown = true;
+        } else {
+            ambientKnown = false;
+        }
+        if (currentPage == PAGE_AUDIO && currentAudioPage == AUDIO_SFX)
+            drawScreen();
+    }
+    if (gotMusicStatus) {
+        Serial.printf("AUDIO <- %s\n", musicStatus);
+        unsigned value = 0, total = 0;
+        if (sscanf(musicStatus, "MUSIC:VOLUME:%u", &value) == 1 &&
+            value <= 100) {
+            radioVolume = value;
+            radioVolumeKnown = true;
+        } else if (strncmp(musicStatus, "MUSIC:", 6) == 0) {
+            const char *state = musicStatus + 6;
+            const char *sep = strchr(state, ':');
+            if (sep &&
+                sscanf(sep + 1, "%u/%u", &value, &total) == 2 &&
+                value >= 1 && value <= 255 &&
+                total >= 1 && total <= 255) {
+                radioTrack = value;
+                radioTrackCount = total;
+                radioTrackKnown = true;
+            }
+            if (!strncmp(state, "PLAYING:", 8)) {
+                radioPlaying = true; radioPaused = false; radioStateKnown = true;
+            } else if (!strncmp(state, "PAUSED:", 7)) {
+                radioPlaying = false; radioPaused = true; radioStateKnown = true;
+            } else if (!strncmp(state, "STOPPED:", 8)) {
+                radioPlaying = false; radioPaused = false; radioStateKnown = true;
+            }
+        }
+        if (currentPage == PAGE_AUDIO && currentAudioPage == AUDIO_RADIO)
+            drawScreen();
+    }
 
     if (gotPong) {
         if (!helmetMacKnown) {
@@ -932,6 +1104,14 @@ void setup() {
 
 void loop() {
     updateHelmetRadio();
+    if (ambientQueryAt && (int32_t)(millis() - ambientQueryAt) >= 0) {
+        ambientQueryAt = 0;
+        sendAudioFxCommand("AMBIENT:STATUS");
+    }
+    if (radioVolumeQueryAt && (int32_t)(millis() - radioVolumeQueryAt) >= 0) {
+        radioVolumeQueryAt = 0;
+        sendAudioMusicCommand("MUSIC:VOLUME");
+    }
     if (currentPage == PAGE_HOME && millis() - lastHomeClockDraw >= 1000) {
         lastHomeClockDraw = millis();
         drawHomeClock();

@@ -63,7 +63,9 @@ void onReceive(const esp_now_recv_info_t *info,
     len > 1 &&
     len <= (int)AUDIO_COMMAND_SIZE &&
     data[len - 1] == '\0' &&
-    strncmp((const char*)data, "MUSIC:", 6) == 0
+    (strncmp((const char*)data, "MUSIC:", 6) == 0 ||
+     strncmp((const char*)data, "FX:", 3) == 0 ||
+     strncmp((const char*)data, "AMBIENT:", 8) == 0)
 ) {
     const char* command = (const char*)data;
 
@@ -76,7 +78,21 @@ void onReceive(const esp_now_recv_info_t *info,
         !strcmp(command, "MUSIC:STATUS") ||
         !strcmp(command, "MUSIC:VOLUP") ||
         !strcmp(command, "MUSIC:VOLDOWN") ||
-        !strcmp(command, "MUSIC:VOLUME");
+        !strcmp(command, "MUSIC:VOLUME") ||
+        !strcmp(command, "FX:READY") ||
+        !strcmp(command, "FX:BOOT") ||
+        !strcmp(command, "FX:TRACKON") ||
+        !strcmp(command, "FX:TRACKOFF") ||
+        !strcmp(command, "FX:CHARGE") ||
+        !strcmp(command, "FX:PLASMA") ||
+        !strcmp(command, "FX:COOL") ||
+        !strcmp(command, "FX:WARN") ||
+        !strcmp(command, "FX:RADIO") ||
+        !strcmp(command, "FX:SELECT") ||
+        !strcmp(command, "FX:STOP") ||
+        !strcmp(command, "AMBIENT:ON") ||
+        !strcmp(command, "AMBIENT:OFF") ||
+        !strcmp(command, "AMBIENT:STATUS");
 
     if (supported) {
         portENTER_CRITICAL(&receiveMux);
@@ -259,7 +275,9 @@ while (Serial2.available()) {
     if (teensyReplyLength > 0) {
       Serial.println(teensyReply);
 
-      if (strncmp(teensyReply, "MUSIC:", 6) == 0) {
+      if (strncmp(teensyReply, "MUSIC:", 6) == 0 ||
+          strncmp(teensyReply, "FX:", 3) == 0 ||
+          strncmp(teensyReply, "AMBIENT:", 8) == 0) {
         esp_err_t result = esp_now_send(
           BROADCAST_MAC,
           reinterpret_cast<const uint8_t*>(teensyReply),
