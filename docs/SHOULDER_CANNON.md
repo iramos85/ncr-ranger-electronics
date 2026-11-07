@@ -39,3 +39,26 @@ constexpr int PAN_PIN  = 19; // Lower servo
 - Implement scan and tracking behavior
 - Connect plasma LEDs and audio effects
 - Validate motion clearances while wearing armor
+
+## PAN Servo Calibration — Initial Bench Test
+
+- Controller: ESP32-WROOM
+- Servo: Lower DS3218
+- GPIO: 19
+- Nominal center: 1500 microseconds
+- Current software range: 1400–1600 microseconds
+- Manual command step: 20 microseconds
+- Direction: Left/right (PAN)
+- Horn installed on rotating cradle
+- Movement confirmed in both directions
+- Upper TILT servo disconnected during testing
+- Cannon head not installed
+
+### Calibration Notes
+
+20-microsecond commands produce visible movement.
+
+The current 1400–1600 microsecond range is a temporary
+software test range, NOT the final mechanical travel limit.
+
+Safe mechanical endpoints still need to be established.
