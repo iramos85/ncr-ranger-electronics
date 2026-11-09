@@ -62,3 +62,57 @@ The current 1400–1600 microsecond range is a temporary
 software test range, NOT the final mechanical travel limit.
 
 Safe mechanical endpoints still need to be established.
+
+## Next Session — Safe PAN Limit Verification
+
+**Status:** Procedure prepared; final travel limits are NOT yet hardware-verified.
+
+### Preserve Known-Good Baseline
+
+- Known-good firmware commit: `983fe1a` ("Calibrate lower PAN servo with 20us manual control").
+- Firmware source: `firmware/shoulder-cannon/src/main.cpp`.
+- Do not change the current PAN firmware or widen its `1400–1600 us` guardrails until clearance is physically verified.
+- GPIO19 = lower PAN; GPIO18 = upper TILT. Keep TILT disconnected for PAN-only tests.
+- Treat `DISARM` as detaching PWM, **not** as removing servo power or holding position. Use the physical power disconnect for an emergency stop.
+
+### Safe PAN Test Procedure
+
+1. Remove the cannon head and keep loose wiring, clothing and fingers clear of the cradle. Test off-body, with the pauldron supported in its intended orientation.
+2. Power down before checking the servo horn screw, cradle fasteners and wire strain relief. Verify a common controller/UBEC ground.
+3. With the upper TILT servo disconnected, open Serial at **115200 baud** and send `STATUS`. Confirm no servo movement occurs on boot.
+4. Clear the mechanism, then send `ARM PAN`. Watch for any abrupt movement as the servo receives its 1500 us center command. If anything binds or jumps, disconnect power and correct the alignment.
+5. Starting at center, send `PAN +` **one command at a time**, observing each 20 us movement; stop immediately for a hard stop, wire tension, horn interference, mounting flex, abnormal noise or increasing load.
+6. Return toward center using `PAN -`, then repeat in the negative direction with separate `PAN -` commands. Do not exceed the existing 1400–1600 us software limits.
+7. Record the last *comfortable* pulse value in each direction, plus where clearance first becomes questionable. Keep a safety margin inside both confirmed comfortable endpoints.
+8. Send `DISARM` before turning off servo power. Do not rely on a detached servo to support the assembly mechanically.
+
+### PAN Results — Fill After Hardware Test
+
+| Measurement | Value | Status |
+|-------------|-------|--------|
+| Center | 1500 us | Nominal / currently tested |
+| Positive software test bound | 1600 us | Temporary limit; final clearance unverified |
+| Negative software test bound | 1400 us | Temporary limit; final clearance unverified |
+| Last comfortable positive pulse | TBD | Not measured |
+| Last comfortable negative pulse | TBD | Not measured |
+| Proposed final operational limits | TBD | Requires margin and re-test |
+| Mount/cable interference notes | TBD | Inspect during testing |
+| Clearance with cannon head reinstalled | TBD | Must be checked separately |
+| Clearance while wearing pauldron | TBD | Must be checked separately |
+
+### TILT Calibration Gate
+
+- Begin only after PAN is centered and the assembly is mechanically stable.
+- Power **off** before reconnecting the upper TILT servo on GPIO18.
+- With the horn/arm unloaded or disengaged as appropriate, establish the upper servo's neutral mechanically; do not assume its existing horn orientation is safe at 1500 us.
+- Create a separate, manual-only TILT calibration stage with explicit arming, small increments, conservative initial software bounds and no automatic sweep.
+- Confirm up/down direction, wire clearance, mechanical stops, and interference throughout the intended PAN range **before** allowing dual-axis motion.
+- No scan/tracking, ESP-NOW movement commands, or plasma firing choreography until both axes have verified software limits and reliable stop behavior.
+
+### Mechanical Refinement Checklist
+
+- Verify four-bolt cradle seating and clearance around the pauldron lip/strap mount.
+- Inspect printed layers and servo-ear towers for bending/cracks under load.
+- Confirm horn fastener retention and servo shaft alignment.
+- Route cables with strain relief and enough slack for both axes; keep them out of gears and pivot paths.
+- Repeat final clearance tests **with cannon head attached** and while wearing the armor before enabling autonomous motion.
