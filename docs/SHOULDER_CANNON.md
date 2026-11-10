@@ -143,3 +143,20 @@ constexpr int PAN_CENTER_US = 1560;
 - Next tests: `TILT CENTER` -> `TILT 1480` -> `TILT CENTER` -> `TILT 1520` -> `TILT CENTER`; observe clearance, wire slack, servo noise, and mount flex at each step. Continue toward 1450 and 1550 only if nearer positions are clear.
 - Keep PAN motion isolated while validating TILT. Do not enable scan/automatic dual-axis motion until full assembly and worn-armor clearance have been verified.
 - Bench configuration uses a straw mock cannon mounted to the cannon plate. Recheck final limits with the real cannon mass attached.
+
+## PAN Reorientation — Recalibration Required
+
+Following reversal of the straw test cannon's forward direction, the previous PAN bench calibration (**1200–1800 us, center 1560 us**) describes the **old physical mounting orientation only**. It remains a historical test result, **not a cleared operational range** for the new orientation.
+
+### Planned mechanical reindex (not yet confirmed complete)
+
+1. Keep TILT stationary and secure the pauldron on the bench.
+2. With existing firmware and the mechanism clear, arm PAN and command `PAN 1500` (the smooth dual-axis sketch must be installed for numeric commands). Verify `STATUS` reports that commanded position and motion has finished.
+3. Shut off servo UBEC power. Remove the lower servo horn retaining screw, lift the rotating assembly from the spline without forcing the shaft or pulling wiring, and position the barrel straight forward over the shoulder. Re-seat and secure the horn at the new forward orientation.
+4. Before rearming the physically reindexed axis, set provisional PAN parameters in the local firmware: `PAN_MIN_US = 1450`, `PAN_MAX_US = 1550`, `PAN_CENTER_US = 1500`; build/upload with servo power off.
+5. Restore power only with the assembly clear. `ARM PAN`, then test `PAN 1480`, `PAN CENTER`, `PAN 1520`, `PAN CENTER`. Watch helmet/cradle collision, cable twist/tension, mounts, and wire routing; stop and remove power if binding.
+6. Reverify the new left/right direction and establish new comfortable endpoints gradually. The newly mounted physical neutral and limits are **pending user verification**.
+
+TILT's mechanically reindexed center remains **1500 us**, subject to verification under the changed cannon orientation. Do not enable automated PAN/TILT movement until both axes have been retested.
+
+Do not treat the provisional narrow limits as final. Preserve tested firmware history until local changes are built and hardware-validated.
