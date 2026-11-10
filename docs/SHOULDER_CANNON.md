@@ -160,3 +160,16 @@ Following reversal of the straw test cannon's forward direction, the previous PA
 TILT's mechanically reindexed center remains **1500 us**, subject to verification under the changed cannon orientation. Do not enable automated PAN/TILT movement until both axes have been retested.
 
 Do not treat the provisional narrow limits as final. Preserve tested firmware history until local changes are built and hardware-validated.
+
+## HOME Command — Proposed Shared Motion API (2026-11-10)
+
+### Intended HOME behavior
+
+- `HOME` is the serial command and future Pip-Boy / ESP-NOW dashboard action for **PAN=1500 us and TILT=1500 us**.
+- The user's upper TILT horn was physically reindexed so 1500 us is the level/forward reference. The lower PAN horn has been scheduled for mechanical reindex at 1500 us after reversing the barrel direction; do **not** assume the new PAN home angle is verified yet.
+- Do not enable automatic arming: `HOME` must reject the request unless **both axes are already armed** and 1500 us is inside both configured software limits.
+- Request motion via the existing nonblocking `setTarget()` / `updateAxis()` controller (5 us steps every 40 ms), rather than writing the end pulses directly. `STOP` remains able to halt the scheduled movement, and `DISARM` remains available.
+- Use a named `requestHome()` function as the common interface for Serial Monitor's `HOME` command and, later, a validated ESP-NOW HOME message from the Pip-Boy dashboard. Do not add a remote HOME trigger until both axes and the swept clearance paths are bench-tested together.
+- Provisional recalibration window recommended: PAN 1450–1550 us and TILT 1450–1550 us; widen only after mechanical clearance checks. Old PAN 1200–1800 us endpoints belong to the previous physical orientation.
+- HOME only requests command pulses; it does not read measured servo position or detect obstructions. The initial servo arming path may still jump to a center command; ensure mechanical alignment before arming.
+- **Implementation status:** Code change supplied for the user's local dual-axis calibration sketch, not committed to GitHub. GitHub's `firmware/shoulder-cannon/src/main.cpp` still contains the older PAN-only known-good version. Avoid overwriting the user’s newer uncommitted local sketch. Build/upload and bench-validate locally before making a firmware commit.
