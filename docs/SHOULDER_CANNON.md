@@ -116,3 +116,20 @@ Safe mechanical endpoints still need to be established.
 - Confirm horn fastener retention and servo shaft alignment.
 - Route cables with strain relief and enough slack for both axes; keep them out of gears and pivot paths.
 - Repeat final clearance tests **with cannon head attached** and while wearing the armor before enabling autonomous motion.
+
+## PAN Calibration — Bench Update (2026-11-09)
+
+User-reported tested values for current bench configuration:
+
+```cpp
+constexpr int PAN_MIN_US = 1200;
+constexpr int PAN_MAX_US = 1800;
+constexpr int PAN_CENTER_US = 1560;
+```
+
+- PAN = GPIO19, lower servo; TILT = GPIO18, upper servo.
+- These values supersede the earlier 1400–1600 us provisional range for the bench-calibration plan.
+- The center is mechanically selected at 1560 us, not the nominal 1500 us.
+- The smooth position-command sketch discussed in chat uses 5 us steps at 40 ms intervals with `PAN <microseconds>`, `PAN CENTER`, `STOP`, and `DISARM`. **Its installation/build/hardware testing are not yet confirmed**; do not assume the GitHub firmware implements those commands.
+- Test values are not yet final on-body operational limits; recheck with the cannon head mounted, wiring secured, and full PAN/TILT clearance, then leave appropriate margins.
+- Existing repository firmware is intentionally unchanged; preserve known-good commit `983fe1a` until locally tested code is ready to commit.
