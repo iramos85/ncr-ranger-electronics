@@ -133,3 +133,13 @@ constexpr int PAN_CENTER_US = 1560;
 - The smooth position-command sketch discussed in chat uses 5 us steps at 40 ms intervals with `PAN <microseconds>`, `PAN CENTER`, `STOP`, and `DISARM`. **Its installation/build/hardware testing are not yet confirmed**; do not assume the GitHub firmware implements those commands.
 - Test values are not yet final on-body operational limits; recheck with the cannon head mounted, wiring secured, and full PAN/TILT clearance, then leave appropriate margins.
 - Existing repository firmware is intentionally unchanged; preserve known-good commit `983fe1a` until locally tested code is ready to commit.
+
+## TILT Mechanical Neutral — Bench Update (2026-11-10)
+
+- Upper TILT servo = GPIO18; horn mechanically reindexed at an indicated **1500 us**.
+- User confirmed that `TILT CENTER` returns the straw test barrel to its straight/level orientation.
+- Earlier `TILT 1520` command moved the barrel downward smoothly without binding **before horn repositioning**. Verify direction again after reindexing; decreasing pulse width is expected to raise the barrel but remains unverified.
+- Initial TILT limits remain provisional at **1450–1550 us**. These are firmware test bounds, **not confirmed mechanical endpoints**.
+- Next tests: `TILT CENTER` -> `TILT 1480` -> `TILT CENTER` -> `TILT 1520` -> `TILT CENTER`; observe clearance, wire slack, servo noise, and mount flex at each step. Continue toward 1450 and 1550 only if nearer positions are clear.
+- Keep PAN motion isolated while validating TILT. Do not enable scan/automatic dual-axis motion until full assembly and worn-armor clearance have been verified.
+- Bench configuration uses a straw mock cannon mounted to the cannon plate. Recheck final limits with the real cannon mass attached.
