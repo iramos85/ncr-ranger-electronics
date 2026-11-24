@@ -1,59 +1,74 @@
 # NCR Ranger Electronics
 
-Firmware and documentation for the NCR Ranger costume electronics system.
+**Distributed embedded systems for an interactive wearable theatrical prop**
 
-## Hardware
+An independent engineering project exploring modular firmware, wireless communication, touchscreen interfaces, digital audio processing, and hardware integration in a wearable costume platform inspired by Fallout.
 
-### Pip-Boy Controller
-- Arduino UNO R4 WiFi
-- 480x320 ILI9486 touchscreen shield
+## Engineering objectives
 
-### Radio Bridge
-- Seeed XIAO ESP32-S3
+- Separate subsystem responsibilities into independently developed firmware projects.
+- Provide a unified touchscreen control interface.
+- Coordinate distributed electronics using wireless messaging.
+- Support incremental hardware testing and maintainable firmware development.
+- Preserve known-good configurations during iterative prototyping.
 
-### Helmet Node
-- Adafruit Feather ESP32 V2
-- BNO085 IMU
-- Helmet fan
-- Lens lighting
+## System architecture
 
-### Shoulder Cannon
-- ESP32 controller
-- BNO085 IMU
-- Dual servo positioning
-- Lighting
+The current development architecture uses an ESP32-S3 central touchscreen controller and separate embedded nodes for helmet electronics, audio, and theatrical effects. The audio subsystem delegates digital audio processing to a Teensy 4.1 over a serial interface.
 
-### Audio
-- Teensy 4.1
-- Teensy Audio Shield Rev D
-- Voice processing
-- Sound effects
+```mermaid
+flowchart TD
+    UI["Metro ESP32-S3 touchscreen"] -->|Wireless messaging| H["Helmet electronics"]
+    UI -->|Wireless messaging| A["Audio controller"]
+    UI -.->|Integration in progress| E["Theatrical effects controller"]
+    H --> L["Lighting and ventilation"]
+    A -->|Serial interface| T["Teensy digital audio"]
+    T --> S["Audio output"]
+```
 
-## Architecture
+The original UNO R4 and XIAO radio bridge architecture remains part of the project's development history.
 
-Pip-Boy / UNO R4
-→ XIAO ESP32-S3 radio bridge
-→ ESP-NOW
-→ costume subsystem nodes
+## Technology stack
 
-## Pip-Boy Baseline
+| Area | Technology |
+| --- | --- |
+| Embedded development | C++, Arduino, PlatformIO |
+| Controllers | ESP32, ESP32-S3, Teensy 4.1 |
+| Wireless communication | ESP-NOW |
+| Local communication | UART |
+| User interface | TFT touchscreen |
+| Audio | Teensy Audio Library, digital signal processing, SD playback |
+| Development | Git, feature branches, hardware verification |
 
-Known-good local UI.
+## Development status
 
-Working:
-- TFT display
-- Resistive touchscreen
-- Tracking button
-- Cannon light button
-- SFX test button
-- Serial diagnostic events
+This is an active prototype, not a completed production system. The current development architecture is distributed across feature branches; the default branch retains the earlier firmware baseline.
 
-Not yet integrated:
-- XIAO radio bridge
-- Helmet online status
-- Cannon online status
-- Audio online status
+| Capability | Status |
+| --- | --- |
+| Touchscreen interface | Hardware-tested baseline |
+| Helmet communication | Prototype integration |
+| Voice modulation | Hardware-tested |
+| SD-based audio playback | Hardware-tested |
+| Local audio effects playback | Hardware-tested |
+| Wireless audio controls | End-to-end verification pending |
+| Theatrical effects subsystem | Integration in progress |
+| Full system regression and endurance testing | Pending |
 
-## Serial
+Status reflects documented development results rather than independent certification or automated test coverage.
 
-Baud rate: 115200
+## Engineering workflow
+
+Development is organized around subsystem-specific firmware projects and feature branches. The workflow emphasizes reviewing changes, compiling before flashing, verifying on hardware, documenting results, and preserving stable firmware baselines.
+
+Selected development documentation:
+
+- [Development standards](https://github.com/iramos85/ncr-ranger-electronics/blob/feature/shoulder-cannon-integration/docs/DEVELOPMENT.md)
+- [PlatformIO setup](https://github.com/iramos85/ncr-ranger-electronics/blob/feature/shoulder-cannon-integration/docs/PLATFORMIO_SETUP.md)
+- [Audio architecture and verification notes](https://github.com/iramos85/ncr-ranger-electronics/blob/feature/shoulder-cannon-integration/docs/RANGER_AUDIO_SYSTEM.md)
+
+## Portfolio scope
+
+This project demonstrates independent systems engineering, technical decision-making, iterative prototyping, and integration across software and physical electronics. It is a personal theatrical costume project, not affiliated with the owners of the Fallout franchise.
+
+The repository is currently private while its source, assets, and commit history are reviewed for appropriate public disclosure.
